@@ -53,8 +53,7 @@ const OPENROUTER_API_URL    = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
 const MAX_TOKENS            = 8192;
 const RATE_LIMIT_DELAY_MS   = 2500;  // pause between requests on free tier
-const MODEL_TIMEOUT_MS      = 15_000; // abort a single free-rotation model call after 15 s
-const PINNED_MODEL_TIMEOUT_MS = Number(process.env.CAREER_OPS_MODEL_TIMEOUT_MS) || 90_000; // pinned models get a real evaluation's worth of time
+const MODEL_TIMEOUT_MS      = 15_000; // abort a single model call after 15 s
 
 // Provider priority order — models are sorted by provider prefix, not hardcoded names.
 // Add, remove, or reorder providers here; model names are resolved at runtime from the API.
@@ -218,7 +217,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
       max_tokens: MAX_TOKENS,
     });
     const ctrl = new AbortController();
-    const timerId = setTimeout(() => ctrl.abort(), PINNED_MODEL_TIMEOUT_MS);
+    const timerId = setTimeout(() => ctrl.abort(), MODEL_TIMEOUT_MS);
     try {
       const resp = await fetch(OPENROUTER_API_URL, {
         method: 'POST',
@@ -243,7 +242,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
       const usage = normalizeOpenAIUsage(data.usage);
       return { content, usage };
     } catch (e) {
-      if (e.name === 'AbortError') throw new Error(`Pinned model timed out after ${PINNED_MODEL_TIMEOUT_MS / 1000}s`);
+      if (e.name === 'AbortError') throw new Error(`Pinned model timed out after ${MODEL_TIMEOUT_MS / 1000}s`);
       throw e;
     } finally {
       clearTimeout(timerId);
