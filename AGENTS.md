@@ -95,6 +95,7 @@ AI-powered, CLI-agnostic job search automation: pipeline tracking, offer evaluat
 | `scan-ats-full.mjs` | Reverse-ATS keyword-first scanner over full public ATS datasets (Greenhouse/Lever/Ashby/Workday/iCIMS), filtered by portals.yml `title_filter`/`location_filter` — no company list needed; checkpoints every 500 companies, `--resume` continues an interrupted sweep |
 | `scan-interamt.mjs` | Playwright browser scanner for Interamt.de (German public sector portal — Apache Wicket, no REST API) |
 | `check-liveness.mjs` / `liveness-core.mjs` | Job posting liveness checker + shared logic (expired signals win over generic Apply text) |
+| `manual-login.mjs` | Human-in-the-loop VNC helper: opens a URL in the MCP browser's persistent profile behind a browser-viewable VNC bridge (Xvfb/x11vnc/websockify) so you can log in to any login-gated portal from any device with a browser, no X server required — see the "Authenticated-portal tip" in "Offer Verification -- MANDATORY" below (`node manual-login.mjs <url>`, `--status`, `--stop`) |
 | `set-status.mjs` | Canonical tracker-row update: `node set-status.mjs <report#\|company> <State> [--note] [--force]` — strict states.yml validation, report-link mismatch guard, shared lock, atomic write |
 | `invite-match.mjs` | Fuzzy-match a pasted interview invite (company, date, req ID) against the tracker, ranking candidates when a company has multiple entries (JSON or `--summary`) |
 | `paste-reply.mjs` | Manual/no-Gmail input into reply-watch classification — normalizes a pasted/file email (subject/from/body) and appends to `data/reply-candidates.json`; never overwrites entries, never classifies, never touches the tracker |
@@ -332,6 +333,13 @@ Two separate axes:
 3. Only footer/navbar without JD = closed. Title + description + Apply = active.
 
 **Exception for batch workers (headless mode):** Playwright is unavailable in headless pipe mode. Use WebFetch as fallback and mark the report header `**Verification:** unconfirmed (batch mode)`; the user can verify manually later.
+
+**Authenticated-portal tip (any site, not just LinkedIn):** some job boards (LinkedIn is the most aggressive example, but any login-gated portal qualifies) block or truncate the JD for an anonymous/logged-out browser session. The MCP Playwright browser (`.mcp.json`, no `--isolated` flag) uses a persistent Chrome profile by default (under `~/.cache/ms-playwright-mcp/`), so a one-time manual login to that same profile makes future verifications see an authenticated session — for whichever site needed it.
+
+- **On a local desktop where the MCP browser already renders on screen:** just log in in that window when it opens.
+- **Over a remote/SSH session (headless, no visible window — the common case for a VPS deployment):** run `node manual-login.mjs <url>` from the project root. It spins up a virtual display (Xvfb) + VNC server (x11vnc) + browser-viewable bridge (websockify/noVNC) pointed at the same persistent profile, and prints the exact `ssh -L <port>:localhost:<port> ...` tunnel command to run from whatever device has a browser (laptop, phone — no X server needed anywhere in the chain, unlike plain `ssh -X`). Open `http://localhost:<port>/vnc.html` there, log in yourself with your own keyboard (credentials never pass through the agent), then run `node manual-login.mjs --stop` to tear it down and release the profile lock so the MCP browser can use it again. `node manual-login.mjs --status` shows an in-progress session.
+
+This does not apply to headless batch workers (see exception above) or to `scan.mjs`/`browser-extract.mjs`, which always run logged-out by design — see `docs/PLUGIN_REVIEW.md` for why authenticated scraping of login-gated sites is out of scope for the automated core, regardless of which portal it is. `manual-login.mjs` is a human-in-the-loop utility only: it opens one URL and waits for you to log in — it is never invoked by any automated/batch flow.
 
 ---
 

@@ -79,3 +79,18 @@ Comment on it and we'll assign it (this is in CONTRIBUTING.md). A PR with no pri
 ## Can I use career-ops without a terminal?
 
 Yes: see [`docs/COWORK.md`](COWORK.md) which covers running it inside Claude Cowork, verified end to end. One step people trip on: Cowork's shell has no npm network access, so clone and `npm install` in a terminal *before* opening the folder.
+
+## Why does pasting a LinkedIn (or any login-gated) URL so often fail to pull the JD?
+
+LinkedIn is the most aggressive example, but any login-gated portal can hide or truncate the job description for an anonymous, logged-out browser session — an interactive verification (`oferta`, `auto-pipeline`) can come back with a paywall or a near-empty snapshot. Fix: log in once to the persistent Chrome profile the MCP Playwright browser uses (`~/.cache/ms-playwright-mcp/`, kept because `.mcp.json` doesn't pass `--isolated`) — once logged in there, every site that needed it stays authenticated for future verifications, not just LinkedIn. How you reach that login screen depends on where the browser renders:
+
+- **Local desktop:** the MCP browser opens a real window — just log in there when it appears.
+- **Remote/SSH session (the common case for a VPS deployment):** the MCP browser runs headless with no visible window, and plain `ssh -X` (X11 forwarding) only works if *some* machine in the chain has a real X server — a headless VPS talking to a headless client has none. Instead, run:
+  ```
+  node manual-login.mjs <url>
+  ```
+  from the project root. It spins up a virtual display + a VNC server + a browser-viewable bridge (Xvfb/x11vnc/websockify, all bound to `127.0.0.1` only) pointed at the same persistent profile, and prints the exact tunnel command to run from *any* device that has a browser — laptop or phone, doesn't matter, no X server needed anywhere. Open the printed `http://localhost:<port>/vnc.html` URL there, hit Connect, and log in with your own keyboard — credentials never pass through the agent. When you're done, run `node manual-login.mjs --stop` to tear everything down and release the profile lock so the MCP browser can reuse the session. `node manual-login.mjs --status` shows whether a session is still running.
+
+See the full "Authenticated-portal tip" in `AGENTS.md`'s "Offer Verification -- MANDATORY" section.
+
+This only helps the interactive one-URL-at-a-time flow. Headless/batch scanning of login-gated sites (`scan.mjs`, `browser-extract.mjs`) always runs logged-out by design, and integrating a persistent authenticated session there — or a library like JobSpy that does the same — isn't something the project takes in the core: `docs/PLUGIN_REVIEW.md` classifies authenticated scraping of login-gated sites as ToS-grey, and `CONTRIBUTING.md` says PRs scraping platforms that prohibit automated access are rejected. The supported path for that is a `career-ops-plugin-<name>` repo you install yourself, at your own risk.
