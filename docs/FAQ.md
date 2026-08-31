@@ -20,6 +20,10 @@ Pass `--limit <N>` to `batch-runner.sh` to cap the number of offers processed in
 
 Yes — career-ops is fully AI-agnostic and works with any AI coding CLI or standalone script. See [docs/RUNNING_ON_A_BUDGET.md](RUNNING_ON_A_BUDGET.md) for a full guide covering OpenCode, Qwen CLI, DeepSeek, OpenRouter, Ollama, and other local or low-cost providers, along with recommended model sizes and token-saving best practices.
 
+**For zero cost specifically**, see [docs/FREE_TIER.md](FREE_TIER.md): career-ops runs on Antigravity CLI's free tier with no API key and no paid subscription, within Google's daily caps.
+
+**And if you already pay for a plan but are being billed per token anyway**, that is usually an `ANTHROPIC_API_KEY` in your environment taking precedence over your subscription: see [the subscription section of the budget guide](RUNNING_ON_A_BUDGET.md#2b-already-paying-for-a-subscription-make-sure-you-are-using-it).
+
 ## 5. What does the "possible cross-listing" warning mean during a scan?
 
 When the scanner shows a warning like:
@@ -43,6 +47,23 @@ it means the job description text of two listings from **different companies** i
 ## 6. Can I use my own CV template?
 
 Yes. Set `cv.template` (and/or `cover_letter.template`) in `config/profile.yml` to the kebab-case name of a template file in `templates/` — a value of `modern` resolves to `templates/cv-template.modern.html` (cover letters use `templates/cover-letter-template.<name>.html`). Leave the field unset and career-ops falls back to the built-in default template (`templates/cv-template.html`). You can also pick a template per generation just by asking (e.g. "use the modern template"). See the commented `cv.template` / `cover_letter.template` fields in `config/profile.example.yml` for the full reference.
+
+## Why does career-ops refuse to use a number from my story bank?
+
+Because a plausible number is not necessarily a verified one. Interview-prep documents are often drafted to match a particular job description, and their phrasing can later be absorbed into `interview-prep/story-bank.md`. Without a provenance check, a figure invented in one prep session can be repeated in the next, gradually turning into an apparent fact.
+
+career-ops therefore uses two trust tiers:
+
+- **Primary, user-authored sources** such as `cv.md`, `article-digest.md`, `config/profile.yml`, `modes/_profile.md`, and `writing-samples/` are the ground truth for factual claims.
+- **Derived, accumulated sources** such as the story bank and company-specific interview prep can supply narrative and phrasing, but a quantified claim must trace back to a primary source or carry a supported marker: `**Provenance:** user-stated YYYY-MM-DD` or `**Provenance:** source: cv.md` counts as verified; `**Provenance:** derived-unverified`, `**Provenance:** user-cannot-confirm`, and arbitrary values do not.
+
+Audit the story bank locally, without an LLM call:
+
+```bash
+node story-provenance-check.mjs --summary
+```
+
+The checker classifies each numeric claim as `existing`, `supportedByResume`, `derived-unverified`, or `user-cannot-confirm`. It is read-only: for a flagged claim, verify it against a primary source, provide the correct figure, remove the number and keep the story as narrative, or say "I don't know." That last answer is intentionally first-class — a `**Provenance:** user-cannot-confirm` marker keeps the number from being treated as verified on a later scan, so an honest unknown is never laundered into a confident fact through repetition.
 
 ## How do I stop a company from showing up in scans?
 
@@ -79,18 +100,3 @@ Comment on it and we'll assign it (this is in CONTRIBUTING.md). A PR with no pri
 ## Can I use career-ops without a terminal?
 
 Yes: see [`docs/COWORK.md`](COWORK.md) which covers running it inside Claude Cowork, verified end to end. One step people trip on: Cowork's shell has no npm network access, so clone and `npm install` in a terminal *before* opening the folder.
-
-## Why does pasting a LinkedIn (or any login-gated) URL so often fail to pull the JD?
-
-LinkedIn is the most aggressive example, but any login-gated portal can hide or truncate the job description for an anonymous, logged-out browser session — an interactive verification (`oferta`, `auto-pipeline`) can come back with a paywall or a near-empty snapshot. Fix: log in once to the persistent Chrome profile the MCP Playwright browser uses (`~/.cache/ms-playwright-mcp/`, kept because `.mcp.json` doesn't pass `--isolated`) — once logged in there, every site that needed it stays authenticated for future verifications, not just LinkedIn. How you reach that login screen depends on where the browser renders:
-
-- **Local desktop:** the MCP browser opens a real window — just log in there when it appears.
-- **Remote/SSH session (the common case for a VPS deployment):** the MCP browser runs headless with no visible window, and plain `ssh -X` (X11 forwarding) only works if *some* machine in the chain has a real X server — a headless VPS talking to a headless client has none. Instead, run:
-  ```
-  node manual-login.mjs <url>
-  ```
-  from the project root. It spins up a virtual display + a VNC server + a browser-viewable bridge (Xvfb/x11vnc/websockify, all bound to `127.0.0.1` only) pointed at the same persistent profile, and prints the exact tunnel command to run from *any* device that has a browser — laptop or phone, doesn't matter, no X server needed anywhere. Open the printed `http://localhost:<port>/vnc.html` URL there, hit Connect, and log in with your own keyboard — credentials never pass through the agent. When you're done, run `node manual-login.mjs --stop` to tear everything down and release the profile lock so the MCP browser can reuse the session. `node manual-login.mjs --status` shows whether a session is still running.
-
-See the full "Authenticated-portal tip" in `AGENTS.md`'s "Offer Verification -- MANDATORY" section.
-
-This only helps the interactive one-URL-at-a-time flow. Headless/batch scanning of login-gated sites (`scan.mjs`, `browser-extract.mjs`) always runs logged-out by design, and integrating a persistent authenticated session there — or a library like JobSpy that does the same — isn't something the project takes in the core: `docs/PLUGIN_REVIEW.md` classifies authenticated scraping of login-gated sites as ToS-grey, and `CONTRIBUTING.md` says PRs scraping platforms that prohibit automated access are rejected. The supported path for that is a `career-ops-plugin-<name>` repo you install yourself, at your own risk.
