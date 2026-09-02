@@ -16,6 +16,14 @@
  *   1. copy .env.example .env
  *   2. Add OPENROUTER_API_KEY=sk-or-v1-... to .env
  *   3. Free API key: https://openrouter.ai
+ *
+ * Env:
+ *   CAREER_OPS_MODEL             Pin a single model instead of the free-model rotation.
+ *   CAREER_OPS_MODEL_TIMEOUT_MS  Timeout for a PINNED model's call (default 300000 = 5min).
+ *                                A real A-G evaluation prompt is tens of thousands of tokens;
+ *                                raise this if your model is slow to respond. Only applies to
+ *                                a pinned model — the free-model rotation keeps its own fast,
+ *                                fail-and-try-the-next-one 15s timeout.
  */
 
 import fs from 'node:fs';
@@ -56,7 +64,29 @@ const OPENROUTER_API_URL    = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
 const MAX_TOKENS            = 8192;
 const RATE_LIMIT_DELAY_MS   = 2500;  // pause between requests on free tier
-const MODEL_TIMEOUT_MS      = 15_000; // abort a single model call after 15 s
+// 15s is a deliberate fail-fast for the free-model ROTATION path below: one
+// slow/unresponsive free model should give up quickly and move to the next
+// one in the fallback list, not stall the whole rotation.
+const MODEL_TIMEOUT_MS      = 15_000; // abort a single free-rotation model call after 15 s
+
+// A PINNED model (CAREER_OPS_MODEL) has no fallback to move to, so it needs a
+// timeout long enough for a real evaluation to actually finish — the full A-G
+// prompt (CV + profile + _shared.md + oferta.md) is tens of thousands of
+// tokens, and 15s isn't enough for that with any model, reasoning or not
+// (confirmed: even a fast non-reasoning model times out on it). Mirrors
+// openai-eval.mjs's own OPENAI_TIMEOUT_MS default (300s) rather than
+// inventing a new number, since that script does not hit this failure and
+// already settled on a sane value for the same kind of call.
+//
+// Parsed permissively (no throw/exit at module scope): this file exports pure
+// functions (parsePortals, buildCachedSystemMessage, buildSystemPrompt) that
+// test-all.mjs imports directly, and a stray malformed env var should not be
+// able to kill an unrelated import. An invalid value just falls back to the
+// default instead.
+const parsedPinnedTimeout = parseInt(process.env.CAREER_OPS_MODEL_TIMEOUT_MS ?? '', 10);
+const PINNED_MODEL_TIMEOUT_MS = Number.isFinite(parsedPinnedTimeout) && parsedPinnedTimeout > 0
+  ? parsedPinnedTimeout
+  : 300_000;
 
 // Provider priority order — models are sorted by provider prefix, not hardcoded names.
 // Add, remove, or reorder providers here; model names are resolved at runtime from the API.
@@ -220,7 +250,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
       max_tokens: MAX_TOKENS,
     });
     const ctrl = new AbortController();
-    const timerId = setTimeout(() => ctrl.abort(), MODEL_TIMEOUT_MS);
+    const timerId = setTimeout(() => ctrl.abort(), PINNED_MODEL_TIMEOUT_MS);
     try {
       const resp = await fetch(OPENROUTER_API_URL, {
         method: 'POST',
@@ -245,7 +275,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
       const usage = normalizeOpenAIUsage(data.usage);
       return { content, usage };
     } catch (e) {
-      if (e.name === 'AbortError') throw new Error(`Pinned model timed out after ${MODEL_TIMEOUT_MS / 1000}s`);
+      if (e.name === 'AbortError') throw new Error(`Pinned model timed out after ${PINNED_MODEL_TIMEOUT_MS / 1000}s — override with CAREER_OPS_MODEL_TIMEOUT_MS (milliseconds)`);
       throw e;
     } finally {
       clearTimeout(timerId);
