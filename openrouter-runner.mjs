@@ -31,8 +31,19 @@ import { TokenAccumulator, formatBreakdown, normalizeOpenAIUsage } from './utils
 import { DEFAULT_USER_AGENT } from './user-agent.mjs';
 import { buildTitleFilter } from './title-keywords.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// DATA_ROOT is the user's personal data directory (cv.md, config/profile.yml,
+// modes/_profile.md, portals.yml, data/, reports/) — resolved the same way
+// every other career-ops entrypoint resolves it (see openai-eval.mjs's own
+// ROOT/DATA_ROOT split), so this runner honors CAREER_OPS_ROOT /
+// CAREER_OPS_DATA_DIR / the .career-ops-data marker file instead of silently
+// reading/writing next to the script. Before this, a user who externalized
+// their data per the project's own documented convention got an evaluation
+// run with no CV and no profile — readFile() returns null on a miss, and the
+// system prompt just drops the missing section rather than failing loudly.
+const DATA_ROOT = getCareerOpsRoot();
 const tracker = new TokenAccumulator();
 let activeModel = null;
 
@@ -160,6 +171,9 @@ async function cmdModels() {
 // ---------------------------------------------------------------------------
 // File helpers
 // ---------------------------------------------------------------------------
+// __dirname-scoped: for files that ship with the script and are auto-updated
+// alongside it (modes/_shared.md, modes/oferta.md, modes/auto-pipeline.md,
+// modes/apply.md, .env, the model-rotation blacklist cache).
 function readFile(relPath) {
   try { return fs.readFileSync(path.join(__dirname, relPath), 'utf-8'); }
   catch { return null; }
@@ -173,6 +187,24 @@ function writeFile(relPath, content) {
 
 function fileExists(relPath) {
   return fs.existsSync(path.join(__dirname, relPath));
+}
+
+// DATA_ROOT-scoped: for the user's own personal data (cv.md, config/profile.yml,
+// modes/_profile.md, portals.yml, data/, reports/) — see the DATA_ROOT comment
+// above for why this needs to be a separate root from the script's own directory.
+function readDataFile(relPath) {
+  try { return fs.readFileSync(path.join(DATA_ROOT, relPath), 'utf-8'); }
+  catch { return null; }
+}
+
+function writeDataFile(relPath, content) {
+  const full = path.join(DATA_ROOT, relPath);
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  fs.writeFileSync(full, content, 'utf-8');
+}
+
+function dataFileExists(relPath) {
+  return fs.existsSync(path.join(DATA_ROOT, relPath));
 }
 
 // ---------------------------------------------------------------------------
@@ -352,10 +384,10 @@ async function callOpenRouter(systemPrompt, userMessage) {
 // ---------------------------------------------------------------------------
 function loadContext() {
   return {
-    cv:          readFile('cv.md')               ?? 'CV not found.',
-    profile:     readFile('config/profile.yml')  ?? '',
-    shared:      readFile('modes/_shared.md')    ?? '',
-    profileMode: readFile('modes/_profile.md')   ?? '',
+    cv:          readDataFile('cv.md')               ?? 'CV not found.',
+    profile:     readDataFile('config/profile.yml')  ?? '',
+    shared:      readFile('modes/_shared.md')        ?? '',
+    profileMode: readDataFile('modes/_profile.md')   ?? '',
   };
 }
 
@@ -447,7 +479,7 @@ async function fetchJobPage(url) {
 // `rawOverride` lets tests feed YAML text directly (see test-all.mjs drift guard).
 // ---------------------------------------------------------------------------
 export function parsePortals(rawOverride) {
-  const raw = rawOverride ?? readFile('portals.yml');
+  const raw = rawOverride ?? readDataFile('portals.yml');
   if (!raw) throw new Error('portals.yml not found');
   const config = yaml.load(raw) || {};
 
@@ -480,7 +512,7 @@ export function parsePortals(rawOverride) {
 // pipeline.md management
 // ---------------------------------------------------------------------------
 function readPipeline() {
-  const content = readFile('data/pipeline.md') ?? '';
+  const content = readDataFile('data/pipeline.md') ?? '';
   const pending = [];
   for (const line of content.split('\n')) {
     const m = line.match(/^- \[ \] (.+)/);
@@ -497,21 +529,21 @@ function readPipeline() {
 }
 
 function markPipelineDone(url) {
-  let content = readFile('data/pipeline.md') ?? '';
+  let content = readDataFile('data/pipeline.md') ?? '';
   const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   content = content.replace(
     new RegExp(`^(- \\[ \\] ${escaped}.*)$`, 'm'),
     (ln) => ln.replace('- [ ]', '- [x]')
   );
-  writeFile('data/pipeline.md', content);
+  writeDataFile('data/pipeline.md', content);
 }
 
 function addToPipeline(entries) {
-  const history = readFile('data/scan-history.tsv') ?? 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\n';
+  const history = readDataFile('data/scan-history.tsv') ?? 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\n';
   const seenUrls = new Set(history.split('\n').slice(1).map(l => l.split('\t')[0]).filter(Boolean));
 
-  const existingPipeline = readFile('data/pipeline.md') ?? '# Pipeline\n\n## Pending\n';
-  const existingApps     = readFile('data/applications.md') ?? '';
+  const existingPipeline = readDataFile('data/pipeline.md') ?? '# Pipeline\n\n## Pending\n';
+  const existingApps     = readDataFile('data/applications.md') ?? '';
   // extract URLs already tracked in applications.md (mirrors scan.mjs dedup logic)
   const appliedUrls = new Set(
     existingApps.split('\n')
@@ -538,8 +570,8 @@ function addToPipeline(entries) {
     hist     += `${e.url}\t${today}\tscan\t${e.role}\t${e.company}\tadded\t${e.location ?? ''}\n`;
   }
 
-  writeFile('data/pipeline.md', pipeline);
-  writeFile('data/scan-history.tsv', hist);
+  writeDataFile('data/pipeline.md', pipeline);
+  writeDataFile('data/scan-history.tsv', hist);
   return newEntries.length;
 }
 
@@ -655,8 +687,8 @@ async function cmdEvaluate(input, ctx) {
   let reservedNumbers;
   try {
     reservedNumbers = await reserveReportNumbers(1, {
-      rootDir: __dirname,
-      reportsDir: path.join(__dirname, 'reports'),
+      rootDir: DATA_ROOT,
+      reportsDir: path.join(DATA_ROOT, 'reports'),
     });
   } catch (e) {
     console.error(`Could not reserve a report number: ${e.message}`);
@@ -674,7 +706,7 @@ async function cmdEvaluate(input, ctx) {
     // Extract Legitimacy from LLM output or fall back to placeholder
     const legitMatch = result.match(/\*\*Legitimacy:\*\*\s*([^\n]+)/);
     const legitLine  = legitMatch ? `**Legitimacy:** ${legitMatch[1].trim()}` : '**Legitimacy:** unconfirmed';
-    writeFile(relPath, `**URL:** ${input || '(pasted)'}\n${legitLine}\n\n${result}`);
+    writeDataFile(relPath, `**URL:** ${input || '(pasted)'}\n${legitLine}\n\n${result}`);
 
     const scoreMatch  = result.match(/(?:score|puntuaci[oó]n)[^\d]*(\d+\.?\d*)/i);
     const scoreValue  = scoreMatch ? parseFloat(scoreMatch[1]) : NaN;
@@ -688,7 +720,7 @@ async function cmdEvaluate(input, ctx) {
     // splitting), so a leading header row makes parts[4]/parts[5] the literal
     // "status"/"score" and the evaluation is skipped ("cannot tell score from
     // status"). Write only the data line.
-    writeFile(tsvFile, tsvLine);
+    writeDataFile(tsvFile, tsvLine);
 
     console.log(`\n✅ Report saved: ${relPath}`);
     console.log('\n─── EVALUATION ──────────────────────────────────────\n');
@@ -698,7 +730,7 @@ async function cmdEvaluate(input, ctx) {
     return relPath;
   } finally {
     try {
-      await releaseReportNumbers(reservedNumbers, { reportsDir: path.join(__dirname, 'reports') });
+      await releaseReportNumbers(reservedNumbers, { reportsDir: path.join(DATA_ROOT, 'reports') });
     } catch (e) {
       console.warn(`Could not release report reservation: ${e.message}`);
     }
@@ -740,18 +772,18 @@ async function cmdApply(ref, ctx) {
   const modeContent = readFile('modes/apply.md') ?? '';
 
   let reportContent;
-  if (fileExists(ref)) {
-    reportContent = readFile(ref);
+  if (dataFileExists(ref)) {
+    reportContent = readDataFile(ref);
   } else {
     const numStr = String(ref).padStart(3, '0');
-    const reportsDir = path.join(__dirname, 'reports');
+    const reportsDir = path.join(DATA_ROOT, 'reports');
     const dirEntries = fs.existsSync(reportsDir) ? fs.readdirSync(reportsDir) : [];
     const matches = dirEntries.filter(f => f.startsWith(numStr));
     if (matches.length === 0) {
       console.error(`Report not found: ${ref}`);
       return;
     }
-    reportContent = readFile(`reports/${matches[0]}`);
+    reportContent = readDataFile(`reports/${matches[0]}`);
   }
 
   if (!reportContent) { console.error('Could not read report content.'); return; }
