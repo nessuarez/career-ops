@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isMainModule } from '../lib/is-main-module.mjs';
+import { isNestedCheckout } from '../lib/mjs-files.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -212,6 +213,14 @@ function walk(dir, out = []) {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name)) continue;
+      // A linked worktree is a second checkout of this repo at some other
+      // commit, and `.git` in SKIP_DIRS does not catch one — it marks itself
+      // with a `.git` FILE (#3499). The dot-prefix skip above happens to cover
+      // Claude Code's default `.claude/worktrees/`, but nothing keeps a
+      // worktree there; one at `wt/` would put a stale copy of every entrypoint
+      // under enforcement, and this gate would grade source the branch does not
+      // contain — passing or failing on the age of somebody's worktree.
+      if (isNestedCheckout(full)) continue;
       walk(full, out);
     } else if (entry.name.endsWith('.mjs')) {
       out.push(full);
@@ -229,6 +238,9 @@ const EXEMPT = new Map([
   // instead of importing it. The exemption covers the source scan ONLY; the
   // behaviour test at the bottom of this file pins its semantics.
   ['update-system.mjs', 'self-loading per #1706; behaviour-pinned below'],
+  // Cookbook parsers are copied outside the repository into gitignored local/.
+  // They must remain standalone, so they cannot import the core helper.
+  ['docs/recipes/gojobs/parse-gojobs-html.mjs', 'standalone cookbook file copied into local/'],
   // This file quotes the pattern in its detector self-test and error messages.
   ['tests/main-guard-convention.test.mjs', 'quotes the pattern to test the detector'],
   // Assigns argv[1] inside a spawned child's preamble so the copied script's

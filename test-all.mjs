@@ -55,9 +55,10 @@ import { tmpdir } from 'os';
 import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as yaml from 'js-yaml';
-import { pass, fail, warn, run, lastRunFailure, formatRunFailure, fileExists, finish, ROOT, QUICK, NODE, DEFAULT_SCRIPT_TIMEOUT_MS, getBash, toBashPath, hermeticGitEnv } from './tests/helpers.mjs';
+import { pass, fail, warn, run, runAcrossUtcDay, runAcrossLocalDay, lastRunFailure, formatRunFailure, fileExists, finish, results, ROOT, QUICK, NODE, DEFAULT_SCRIPT_TIMEOUT_MS, getBash, toBashPath, hermeticGitEnv } from './tests/helpers.mjs';
 import { flagValue, hasFlag } from './lib/cli-flags.mjs';
-import { collectMjsFiles } from './lib/mjs-files.mjs';
+import { collectMjsFiles, isNestedCheckout, isUnderNestedCheckout } from './lib/mjs-files.mjs';
+import { SCRATCH_PREFIX, isScratchDir, markScratchOwner, sweepScratchDirs } from './lib/scratch-dirs.mjs';
 
 /**
  * Read a repo-relative text file as UTF-8.
@@ -112,10 +113,70 @@ function discoverTests(dir) {
   const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const entry of entries) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...discoverTests(full));
-    else if (entry.name.endsWith('.test.mjs')) out.push(full);
+    if (entry.isDirectory()) {
+      // A worktree under tests/ is a second checkout of this repository, and
+      // this walker does not merely read what it finds — it hands the files to
+      // the runner. Without this guard a stale checkout's suites execute
+      // against the current tree and the run prints "safe to push/merge" for
+      // them (#3762). `git worktree add` accepts any path, so nothing but this
+      // check keeps one out. Tested on children only: TESTS_DIR is never itself
+      // a checkout root, and the root exemption in `collectMjsFiles` exists for
+      // a case that cannot arise here.
+      if (isNestedCheckout(full)) continue;
+      out.push(...discoverTests(full));
+    } else if (entry.name.endsWith('.test.mjs')) out.push(full);
   }
   return out;
+}
+
+// Strip comment lines before grepping a discovered suite's source for a
+// forbidden call: a suite that only MENTIONS a call in a comment (e.g.
+// documenting why it doesn't make it) must not be flagged.
+//
+// Removed: whole-line `//` comments, and every line of a `/* ... */` block,
+// including unstarred interior lines. Kept: any code that shares a line with a
+// comment, on either side of it, so a real call can never hide behind one:
+// `/* why */ process.exit(1)` and `*gen() { finish() }` are still scanned.
+// Trailing `//` comments on a code line are deliberately still scanned,
+// erring toward a loud false positive, never a silent miss.
+//
+// Comment markers inside a multi-line template literal are text, not
+// comments, and an interpolation there IS executable — so nothing is stripped
+// while the kept code has an odd number of unescaped backticks (quoted
+// strings and trailing `//` comments excluded from the count). An opener that
+// never closes is not a comment we understand either; the raw source is
+// scanned instead. Both limits fail loud, never silent.
+function stripCommentLines(src) {
+  let inBlock = false;
+  let inTemplate = false;
+  const kept = [];
+  for (const line of src.split('\n')) {
+    let rest = line;
+    if (!inTemplate) {
+      if (inBlock) {
+        const end = rest.indexOf('*/');
+        if (end === -1) continue;
+        inBlock = false;
+        rest = rest.slice(end + 2);
+      }
+      // A block comment opening at the start of the (remaining) line: drop it,
+      // then look again — `/* a */ /* b */ code` keeps `code`.
+      let open;
+      while ((open = /^\s*\/\*/.exec(rest))) {
+        const end = rest.indexOf('*/', open[0].length);
+        if (end === -1) { inBlock = true; rest = ''; break; }
+        rest = rest.slice(end + 2);
+      }
+      if (/^\s*(\/\/|$)/.test(rest)) continue;
+    }
+    kept.push(rest);
+    const code = rest
+      .replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g, '')
+      .replace(/\/\/.*$/, '');
+    if (((code.match(/(?<!\\)`/g) ?? []).length) % 2 === 1) inTemplate = !inTemplate;
+  }
+  if (inBlock) return src;
+  return kept.join('\n');
 }
 
 async function runDiscovered(filter = null) {
@@ -136,7 +197,9 @@ async function runDiscovered(filter = null) {
     // process.exit() inside one would terminate test-all mid-run with a forged
     // exit code — every later section (and finish()) would silently never run.
     // Refuse to import such a suite and fail loudly instead (#1916 regression).
-    if (/\bprocess\.exit\s*\(/.test(src)) {
+    // stripCommentLines() first: a suite that only MENTIONS process.exit() in
+    // a comment (e.g. documenting why it doesn't call it) must not be flagged.
+    if (/\bprocess\.exit\s*\(/.test(stripCommentLines(src))) {
       fail(`${rel} calls process.exit() — discovered suites must use pass/fail from tests/helpers.mjs and never exit`);
       continue;
     }
@@ -171,7 +234,10 @@ async function runDiscovered(filter = null) {
     // finish() prints the global summary and exits — inside a discovered suite
     // it forges the verdict line and decapitates every suite sorting after it,
     // sailing past the process.exit() check above (the exit lives in helpers).
-    if (/\bfinish\s*\(\s*\)/.test(src)) {
+    // Same stripCommentLines() treatment as the process.exit() guard above: a
+    // suite that only MENTIONS finish() in a comment (e.g. documenting why it
+    // doesn't call it) must not be flagged.
+    if (/\bfinish\s*\(\s*\)/.test(stripCommentLines(src))) {
       fail(`${f.slice(ROOT.length + 1)} calls finish() — only test-all.mjs may print the global summary; discovered suites use pass/fail and return`);
       continue;
     }
@@ -185,16 +251,76 @@ async function runDiscovered(filter = null) {
     // checks with it, with no verdict line at all — #2828.) A discovered suite
     // is a guest, not a co-host: its crash is one failure, not the end of the
     // run.
+    const before = results();
     try {
       await import(pathToFileURL(f).href);
     } catch (err) {
+      const ran = (results().passed - before.passed) + (results().failed - before.failed);
       fail(`${rel} — suite threw and was contained (${err?.code ?? err?.name ?? 'Error'}): ${err?.message ?? err}`);
+      // How much this counts as "one failure" actually cost: the reported
+      // totals only ever include the `ran` assertions above, and nothing else
+      // says the rest never happened — on one platform a suite's crash reads
+      // as one broken assertion, on another the same file's assertions run
+      // and pass, and the two summaries look the same shape (#3976).
+      //
+      // An earlier version of this line also estimated how many assertions
+      // never ran, from a static count of pass()/fail() call sites in the
+      // file. artemtrofymenko (the issue's author) measured that estimate
+      // against real suites and found it wrong in both directions badly
+      // enough to make the diagnostic worse than none: a suite asserting
+      // through a local wrapper (`function ok(cond) { if (cond) pass(...)
+      // else fail(...) }`) has far more real assertions than call sites
+      // (tests/discover-ats.test.mjs: 155 executed, 4 call sites — the
+      // estimate goes negative, `lost > 0` is false, and the line silently
+      // does not print, reverting to exactly the pre-fix silence for the
+      // suites this was built for — 38 of 278 in-process suites use this
+      // shape); a suite writing `if (cond) pass(...); else fail(...)` pairs
+      // has roughly twice as many call sites as real assertions
+      // (tests/providers/_http.test.mjs: ~2x), so the estimate invents lost
+      // assertions that never existed. A signal present for some suites and
+      // silently absent for others turns its own absence into a false
+      // reassurance — worse than never estimating at all. `ran` alone does
+      // not have that failure mode: it is an exact count in every case, so
+      // it is printed unconditionally instead.
+      console.log(`      ${ran} assertion${ran === 1 ? '' : 's'} ran before the throw; everything after it in this file did not run`);
       // The throw site, not just the message: a suite that dies mid-import
       // leaves no other clue how far it got.
       for (const line of String(err?.stack ?? '').split('\n').slice(1, 4)) {
         if (line.trim()) console.log(`      ${line.trim()}`);
       }
     }
+  }
+}
+
+// A scratch copy left by a killed run used to poison every walker that follows:
+// `.gitignore` hides it and the copy carries no `.git`, so neither `git status`
+// nor `isNestedCheckout()` could see it, and the layout guards read a second
+// copy of `tests/` as several hundred misplaced suites (#3940).
+//
+// What makes the run correct is `isScratchDir` in the walkers, not this sweep —
+// they skip a leftover whether it gets removed or not. This only reclaims the
+// disk, which is why it can afford the age gate that keeps it off a scratch a
+// concurrent run is still writing into.
+//
+// Placed before the `--only` exit below: the 264-failure run is exactly the one
+// a developer then re-runs with `--only core-test-layout` to look closer, and a
+// sweep they skip past would leave that second run behaving differently again.
+{
+  const { removed, failed } = sweepScratchDirs(ROOT);
+  // Only speak when there was something to say. A sweep is silent on the
+  // overwhelming majority of runs, and a line reporting that nothing happened
+  // would be noise at the top of every one of them. `kept` is deliberately not
+  // reported: a young scratch is somebody else's live run, and it is none of
+  // this run's business.
+  for (const name of removed) {
+    console.log(`  🧹 removed a stale scratch copy from an interrupted run: ${name}/`);
+  }
+  for (const { name, error } of failed) {
+    // Not fatal — the walkers skip it, so every guard below still grades the
+    // real tree — but not silent either: something is holding a directory this
+    // run tried to delete, and that is worth knowing before it becomes a
+    // disk-space question.
+    warn(`could not remove the stale scratch copy ${name}/ (${error}) — the guards skip it, so this run is unaffected`);
   }
 }
 
@@ -329,8 +455,10 @@ const scripts = [
   { name: 'merge-tracker.mjs --dry-run', expectExit: 0 },
   { name: 'reconcile-pipeline.mjs --dry-run', expectExit: 0 },
   { name: 'analyze-patterns.mjs --self-test', expectExit: 0 },
+  { name: 'keyword-match.mjs --self-test', expectExit: 0 },
   { name: 'calibrate.mjs --self-test', expectExit: 0 },
   { name: 'check-table-freshness.mjs --self-test', expectExit: 0 },
+  { name: 'check-jd-archive.mjs --self-test', expectExit: 0 },
   { name: 'upskill.mjs --self-test', expectExit: 0 },
   { name: 'detect-reposts.mjs --self-test', expectExit: 0 },
   { name: 'rank-pipeline.mjs --self-test', expectExit: 0 },
@@ -347,6 +475,7 @@ const scripts = [
   { name: 'build-cv-html.mjs --test', expectExit: 0 },
   { name: 'jd-skill-gap.mjs --self-test', expectExit: 0 },
   { name: 'story-provenance-check.mjs --self-test', expectExit: 0 },
+  { name: 'cv-title-check.mjs --self-test', expectExit: 0 },
   { name: 'verify-cv-facts.mjs --self-test', expectExit: 0 },
   { name: 'verify-ats.mjs --self-test', expectExit: 0 },
   { name: 'contacts.mjs --self-test', expectExit: 0 },
@@ -354,10 +483,27 @@ const scripts = [
   { name: 'invite-match.mjs --self-test', expectExit: 0 },
   { name: 'tracker-sync-check.mjs --self-test', expectExit: 0 },
   { name: 'updater-migration-tests.mjs', expectExit: 0 },
-  { name: 'tracker-columns-tests.mjs', expectExit: 0 },
+  // The second outlier, on the same grounds as tracker-writer-lock-tests.mjs
+  // below and measured the same way. It spawns five node subprocesses
+  // (merge-tracker, verify-pipeline) against throwaway mkdtempSync trees, and
+  // that cost is the behaviour under test rather than slack to be trimmed.
+  //
+  // Measured on windows-latest across six green runs: 10.9s, 11.7s, 11.9s,
+  // 12.0s, 12.4s, 13.8s, which makes it the SLOWEST script in this section
+  // there, a hair above tracker-writer-lock-tests.mjs at 11.6s on the same run.
+  // A seventh run ran past the 30s default and was killed mid-suite
+  // (`exit null, signal SIGTERM`) while ubuntu, macos and every other check on
+  // that commit passed (#4010, same shape as #2906). Locally on an idle box it
+  // is 4.2s, so the spread is Windows process creation under runner load.
+  //
+  // SLOW_SCRIPT_WARN_FRACTION could not have given notice: at a typical 12s of
+  // 30s this never reaches the 75% warning, so it goes from silent to killed
+  // with nothing in between. The ceiling is the only signal it has.
+  { name: 'tracker-columns-tests.mjs', expectExit: 0, timeoutMs: 180_000 },
   { name: 'agent-inbox-tests.mjs', expectExit: 0 },
   { name: 'followup-seed-tests.mjs', expectExit: 0 },
   { name: 'paste-reply-tests.mjs', expectExit: 0 },
+  { name: 'contact-extract-tests.mjs', expectExit: 0 },
   { name: 'set-status-tests.mjs', expectExit: 0 },
   // The one script in this list that genuinely needs longer than the shared
   // budget. It spawns competing writer processes for 27 contention cases, and
@@ -390,13 +536,19 @@ const scripts = [
   // default portals.yml because end-user workspaces often have a real user-layer
   // portals file that would trigger a live remote sweep during tests.
   { name: 'verify-portals.mjs --file .tmp-test-missing-portals.yml', expectExit: 0 },
+  // Pins #4250: --help must exit fast on its own, never fall through to the
+  // full network sweep (which is what "no output for minutes" looks like).
+  { name: 'verify-portals.mjs --help', expectExit: 0 },
   { name: 'update-system.mjs check', expectExit: 0 },
   { name: 'seed-fixture.mjs --self-test', expectExit: 0 },
   { name: 'archive-posting.mjs --help', expectExit: 0 },
 ];
 
-const scriptTmp = mkdtempSync(join(ROOT, '.tmp-script-test-'));
+const scriptTmp = mkdtempSync(join(ROOT, SCRATCH_PREFIX));
 try {
+  // Claim before copying or running scripts. If this fails, stop and let the
+  // finally below remove the unused directory rather than run without an owner.
+  markScratchOwner(scriptTmp);
   // Never copied, at any depth: dependency trees and git metadata. Nothing run
   // from the throwaway copy reads them (module resolution walks up into the
   // real ROOT/node_modules, which is how the root-level exclusion already
@@ -412,7 +564,34 @@ try {
     // as test-fixtures/upgrade/state-*/data and .../reports still get copied.
     if (dirname(src) === ROOT && exclude.includes(name)) return;
     const stat = statSync(src);
+    // A leftover from an earlier interrupted run is not repository source, and
+    // copying one nests it inside this run's scratch — which is how #3940's
+    // `.tmp-script-test-OP9Bzd/.tmp-script-test-tBjFgy/…` came to exist. This
+    // run's OWN scratch is already excluded by name just above; what this adds
+    // is the stale one the startup sweep could not remove, and — since that
+    // sweep deliberately leaves a live run's directory alone — the one a
+    // concurrent run is writing into right now.
+    //
+    // Directories only, which is why this reads `stat` rather than sitting with
+    // the name-based exclusions above: the prefix can name a FILE too, and
+    // dropping a source file from the copy would make a script check pass by
+    // not running it.
+    //
+    // At any depth, deliberately, where sweepScratchDirs() looks only at the top
+    // level. The two are asymmetric because their costs are: skipping a
+    // directory that turns out to be someone's oddly-named fixture loses a copy
+    // nothing reads, while DELETING it loses their work. Cheap to over-skip,
+    // expensive to over-delete.
+    if (stat.isDirectory() && isScratchDir(name)) return;
     if (stat.isDirectory()) {
+      // A linked worktree is a whole second checkout of this repo and carries a
+      // `.git` FILE, not a directory, so the name-based exclusion above never
+      // fires on one (#3499). Copying it doubles this section's copy cost and
+      // seeds the throwaway tree with a stale duplicate of every script.
+      // Skipped below the root ONLY: `src === ROOT` on the first call, and
+      // ROOT's own `.git` is legitimately a file when the suite is being run
+      // FROM a worktree — testing it there would copy nothing at all.
+      if (src !== ROOT && isNestedCheckout(src)) return;
       mkdirSync(dest, { recursive: true });
       for (const entry of readdirSync(src)) {
         copyDirSync(join(src, entry), join(dest, entry), exclude);
@@ -427,6 +606,7 @@ try {
     // drops them wherever they occur, root included.
     'data',
     'reports',
+    '.update-lock',
     '.career-ops-web',
     '.playwright-mcp',
     '.agents',
@@ -649,9 +829,16 @@ try {
     hiddenScriptMetric,
     '<html><body><script>const claim = "500 users";</script\t\n bar><p>Generated CV</p></body></html>'
   );
+  // The metric must be one NO real cv.md can support. verify-cv-facts.mjs
+  // validates against the LIVE source files, so a plausible fixture number
+  // silently inverts this assertion for any user whose CV happens to contain
+  // it: on a checkout whose cv.md read "~500 active users/month", the old
+  // "500 users" fixture was genuinely SUPPORTED, verify-cv-facts correctly
+  // declined to flag it, and this test reported that correct behaviour as a
+  // miss. The test passed or failed depending on whose CV was checked out.
   writeFileSync(
     visibleMetric,
-    '<html><body><p>Improved onboarding for 500 users.</p></body></html>'
+    '<html><body><p>Improved onboarding for 918273645 users.</p></body></html>'
   );
 
   const hiddenResult = run(NODE, ['verify-cv-facts.mjs', hiddenScriptMetric], {
@@ -1787,21 +1974,29 @@ for (const f of skillEntrypoints) {
   }
 }
 
-// The plugin manifest ships in two locations: .claude-plugin/plugin.json is
-// canonical (Claude Code + Copilot CLI both read it), and .github/plugin/
+// The plugin manifest ships in three locations: .claude-plugin/plugin.json is
+// canonical (Claude Code + Copilot CLI both read it); .github/plugin/
 // plugin.json exists only because the awesome-copilot marketplace validator
-// accepts just three paths and the Claude-compat one is not among them. Both
-// are bumped by release-please; this assert makes any other divergence fail CI
-// loudly instead of shipping two drifting manifests.
+// accepts just three paths and the Claude-compat one is not among them; and
+// .codex-plugin/plugin.json is the path the awesome-ai-plugins catalogue
+// resolves a Codex plugin's install_url to. All are bumped by release-please;
+// this assert makes any other divergence fail CI loudly instead of shipping
+// drifting manifests.
 {
   const canonManifest = readFile('.claude-plugin/plugin.json');
-  const copilotManifest = fileExists('.github/plugin/plugin.json') ? readFile('.github/plugin/plugin.json') : null;
-  if (copilotManifest === null) {
-    fail('.github/plugin/plugin.json missing — awesome-copilot validator needs it (mirror of .claude-plugin/plugin.json)');
-  } else if (canonManifest === copilotManifest) {
-    pass('plugin.json mirror (.github/plugin/) is byte-identical to the canonical manifest');
-  } else {
-    fail('plugin.json mirror (.github/plugin/) DIVERGED from .claude-plugin/plugin.json — edit the canonical one and copy it verbatim');
+  const mirrors = [
+    ['.github/plugin/plugin.json', 'awesome-copilot validator needs it'],
+    ['.codex-plugin/plugin.json', 'awesome-ai-plugins resolves the Codex install_url to it'],
+  ];
+  for (const [mirrorPath, why] of mirrors) {
+    const mirror = fileExists(mirrorPath) ? readFile(mirrorPath) : null;
+    if (mirror === null) {
+      fail(`${mirrorPath} missing — ${why} (mirror of .claude-plugin/plugin.json)`);
+    } else if (canonManifest === mirror) {
+      pass(`plugin.json mirror (${mirrorPath}) is byte-identical to the canonical manifest`);
+    } else {
+      fail(`plugin.json mirror (${mirrorPath}) DIVERGED from .claude-plugin/plugin.json — edit the canonical one and copy it verbatim`);
+    }
   }
 }
 
@@ -1942,6 +2137,30 @@ const allowedFiles = [
   'dashboard/internal/ui/screens/progress.go',
 ];
 
+// Paths added for #4131, checked by EXACT match rather than folded into
+// allowedFiles above. allowedFiles.some(a => file.includes(a)) is a
+// substring test, which every pre-existing entry already relies on (a
+// nested path containing e.g. "README.md" is exempted too) — widening that
+// same list with plain root-relative basenames like 'funding.json' or
+// 'HIRED.md' would also silently exempt an unrelated tracked file that
+// merely shares a basename, such as a future fixtures/funding.json or
+// snapshots/tests/hired-wall.test.mjs (luochen211, #4144 review). These are
+// the ones this PR actually intends to allow, so they get the tighter
+// check instead of loosening the shared one.
+const exactAllowedFiles = new Set([
+  // GitHub Sponsors funding target + Codex plugin manifest (#4131) — same
+  // maintainer-credit shape as the .claude-plugin/.github/plugin ones above.
+  'funding.json', '.codex-plugin/plugin.json',
+  // Hired Wall: celebrates a hire with a link back to the project, and the
+  // scripts/tests that build and cover that feature necessarily carry the
+  // same URL (#4131).
+  'HIRED.md', 'hired-wall-build.mjs', 'tests/hired-wall.test.mjs', 'tests/project-identity.test.mjs',
+  // Dashboard credit string (#4131) — same substring-vs-exact reasoning as
+  // the entries above; the pre-existing pipeline.go/progress.go entries stay
+  // in the broad allowedFiles list above since they predate this PR.
+  'dashboard/internal/ui/screens/stats.go',
+]);
+
 // Build pathspec for git grep — only scan tracked files matching these
 // extensions. This is what `grep -rn` was trying to do, but git-aware:
 // untracked files (debate artifacts, AI tool scratch, local plans/) and
@@ -1953,15 +2172,45 @@ const grepPathspecs = scanExtensions.map(e => `*.${e}`);
 
 let leakFound = false;
 for (const pattern of leakPatterns) {
-  const result = run(
-    'git',
-    ['grep', '-n', pattern, '--', ...grepPathspecs],
-    { stdio: ['pipe', 'pipe', 'ignore'] }
-  );
+  // --name-only -z NUL-delimits filenames only — no line number, no matching
+  // line, nothing but the path is ever needed here. A prior version used
+  // plain `-n -z` (path\0line\0matching-line\n) and split on '\n' first to
+  // recover records, but a tracked filename containing a literal embedded
+  // newline byte — legal on Linux and macOS — would then be truncated at
+  // that byte, before the real end of the record. A truncated name that
+  // happens to collide with an allowed one (or with the empty string) would
+  // then skip the warning for whatever the file actually leaks (CodeRabbit,
+  // #4144 review). `--name-only -z` sidesteps the ambiguity entirely: NUL is
+  // the only delimiter, so a raw newline inside a filename is preserved
+  // verbatim and splitting purely on '\0' recovers the exact path every time.
+  //
+  // execFileSync() directly, NOT the shared run() helper: run()'s documented
+  // contract is "trimmed stdout" (tests/helpers.mjs), and .trim() strips
+  // whitespace from the very ends of the whole NUL-joined blob. A tracked
+  // filename that legitimately starts or ends with a space — legal on
+  // Linux/macOS — would have that space silently stripped if it happened to
+  // be the first or last match, corrupting the one thing this whole fix
+  // exists to keep exact (CodeRabbit, #4144 review).
+  let result = null;
+  try {
+    result = execFileSync(
+      'git',
+      ['grep', '--name-only', '-z', pattern, '--', ...grepPathspecs],
+      { cwd: ROOT, encoding: 'utf-8', timeout: 30000, stdio: ['pipe', 'pipe', 'ignore'] },
+    );
+  } catch (error) {
+    // git grep exits 1 with no matches — nothing to warn about. Any other
+    // failure (a real git error, or the 30s timeout above firing) must not
+    // be swallowed the same way: silently treating it as "no matches" would
+    // let this whole check report a false "no leaks" on a run where it
+    // never actually completed (CodeRabbit, #4144 review).
+    if (error?.status !== 1) throw error;
+  }
   if (result) {
-    for (const line of result.split('\n')) {
-      const file = line.split(':')[0];
+    for (const file of result.split('\0')) {
+      if (!file) continue;
       if (allowedFiles.some(a => file.includes(a))) continue;
+      if (exactAllowedFiles.has(file)) continue;
       if (file.includes('dashboard/go.mod')) continue;
       warn(`Possible personal data in ${file}: "${pattern}"`);
       leakFound = true;
@@ -2070,7 +2319,18 @@ if (generatePdfScript.includes('--allow-reorder')) {
 try {
   const { validateCvSectionOrder } = await import(pathToFileURL(join(ROOT, 'generate-pdf.mjs')).href);
   const cvMarkdown = '# Education\ntext\n# Work Experience\ntext\n# Projects\ntext';
-  const reorderedHtml = '<div class="section-title">Projects</div><div class="section-title">Education</div>';
+  // Education first, then Projects, then Experience last: diverges from cv.md
+  // (which puts Education before Experience before Projects) AND from the
+  // canonical modes/pdf.md tailoring order (#3640, which puts Experience
+  // before Projects before Education) — genuinely scrambled rather than the
+  // one documented reorder pdf.md always produces, which #3640 makes this
+  // guard stop rejecting. `<div class="section-title">Projects</div><div
+  // class="section-title">Education</div>` used to stand in for "reordered",
+  // but Projects-before-Education IS that documented reorder, so it no
+  // longer exercises the "genuinely scrambled" path this test is named for.
+  const reorderedHtml = '<div class="section-title">Education</div>'
+    + '<div class="section-title">Projects</div>'
+    + '<div class="section-title">Experience</div>';
 
   let threw = false;
   try {
@@ -2079,9 +2339,9 @@ try {
     threw = true;
   }
   if (threw) {
-    pass('validateCvSectionOrder throws on a reordered CV by default (--allow-reorder unset)');
+    pass('validateCvSectionOrder throws on a genuinely scrambled CV by default (--allow-reorder unset)');
   } else {
-    fail('validateCvSectionOrder should throw by default when section order diverges from cv.md');
+    fail('validateCvSectionOrder should throw by default when section order diverges from cv.md AND the canonical modes/pdf.md order');
   }
 
   const originalWarn = console.warn;
@@ -2428,11 +2688,101 @@ if (
   fail('batch final JSON does not require typed, escaped serialization');
 }
 
-const batchTrackerStep = batchPrompt.match(/### Step 5 \u2014 Tracker TSV Line[\s\S]*?### Step 6 \u2014 Final JSON/)?.[0] ?? '';
-if (/\{\{REPORT_NUM\}\}\\t\{\{DATE\}\}/.test(batchTrackerStep) && !/Compute `\{next_num\}`/.test(batchTrackerStep)) {
+// Anchored on the step NUMBER, not the section's wording: the title used to be
+// matched verbatim, so rewording it ("TSV Line" → "TSV Row" when the format
+// gained a header row, #3517) left this matching nothing and failing on the
+// empty string rather than on the thing it asserts.
+const batchTrackerStep = batchPrompt.match(/### Step 5 \u2014 [^\n]*[\s\S]*?### Step 6 \u2014 Final JSON/)?.[0] ?? '';
+// The rule protected here is the #749 race: parallel workers must never compute
+// `max+1` themselves. Absence of one spelling is not that property — rewording
+// the forbidden instruction passed the old literal check (#3937) — so the
+// load-bearing assertion is positive: the step must SAY the coordinator
+// reserved the tracker number.
+//
+// It is scoped to one SENTENCE that names the coordinator, a reservation, and
+// the number, because each part checked independently over the whole step is
+// satisfiable by text that means the opposite: "The coordinator reserves the
+// meeting room. Calculate the tracker number yourself." reserves something
+// else, and "The coordinator does not, in fact, reserve this number" negates
+// the claim past any fixed-width negation guard. Word order is free, so
+// "reserved by the coordinator" reads the same as "coordinator reserves".
+//
+// The mirror-image guard on *calculate* wording is deliberately absent: the
+// sentence satisfying this gate is itself negated ("...so do not calculate a
+// local `max+1`"), so such a rule would flag the correct prompt. Negation is
+// therefore only rejected when it precedes `reserv` inside that sentence — the
+// whole prefix, and with no \b before `n't` so contractions ("doesn't reserve")
+// are caught. The original literal stays as a cheap extra, but the gate no
+// longer rests on it.
+const batchTrackerRowShape = /\{\{REPORT_NUM\}\}\\t\{\{DATE\}\}/.test(batchTrackerStep);
+const batchReserveSentence = batchTrackerStep
+  .split(/(?<=[.\n])/)
+  .find((sentence) =>
+    /coordinator/i.test(sentence) &&
+    /\breserv/i.test(sentence) &&
+    /\b(?:numbers?|tracker|REPORT_NUM)\b/i.test(sentence));
+const batchNumIsReserved =
+  batchReserveSentence !== undefined &&
+  !/(?:\bnot\b|\bnever\b|\bcannot\b|n['’]t)[^.]*\breserv/i.test(batchReserveSentence);
+if (
+  batchTrackerRowShape &&
+  batchNumIsReserved &&
+  !/Compute `\{next_num\}`/.test(batchTrackerStep)
+) {
   pass('batch workers use the coordinator-reserved tracker number');
+} else if (!batchTrackerRowShape) {
+  fail('batch Step 5 no longer shows the `{{REPORT_NUM}}\\t{{DATE}}` tracker row');
+} else if (!batchNumIsReserved) {
+  fail('batch Step 5 no longer states that the coordinator reserves the tracker number');
 } else {
   fail('batch workers still compute tracker numbers independently');
+}
+
+// ...and Step 5 must still describe the FORMAT it writes. The assertion above
+// cannot see that: a prompt that dropped the header row, the additions path, or
+// the one-data-row rule would still carry `{{REPORT_NUM}}\t{{DATE}}` and pass,
+// while telling workers to emit the headerless form — the one where score and
+// status are told apart by content, with a case that has no answer (#3517).
+// The labels come from tracker-parse rather than a list here, so this follows
+// the format instead of restating it and drifting.
+const { TSV_REQUIRED_FIELDS: REQUIRED_TSV_LABELS } = await import(pathToFileURL(join(ROOT, 'tracker-parse.mjs')).href);
+// The prompt writes tabs as the literal two-character escape, not real tabs.
+const batchStepLines = batchTrackerStep.split('\n');
+const batchTsvLines = batchStepLines.filter(l => l.includes('\\t'));
+const batchTsvLabels = (batchTsvLines[0] ?? '').trim().split('\\t').map(s => s.trim());
+const batchLabelsMissing = REQUIRED_TSV_LABELS.filter(f => !batchTsvLabels.includes(f));
+// Width parity, NOT width == REQUIRED_TSV_LABELS.length: the prompt carries the
+// optional `notes` and `url` columns on purpose (url is the deterministic dedup
+// key #1298 added here), so pinning the count to the required set would forbid
+// them. What must hold is that the two lines describe the SAME row — a header
+// with an extra label over a short data row is a template that teaches a
+// shifted row.
+const batchDataFields = (batchTsvLines[1] ?? '').trim().split('\\t');
+// Structure, not prose: the labels line must be immediately followed by the
+// data row, so the section shows ONE headed block rather than two examples that
+// happen to sit in the same step. The instruction sentence is matched exactly
+// rather than by keyword — `/two TSV lines/i` also matches "do NOT write two
+// TSV lines", which is the polarity trap that lets a reversed instruction pass.
+const batchHeaderIdx = batchStepLines.findIndex(l => l.includes('\\t'));
+// Identity, not just "the next line mentions the placeholder": a prose line
+// carrying {{REPORT_NUM}} between the two fence lines would satisfy a contains
+// check while batchDataFields went on reading the real data row further down —
+// adjacency and width would then be describing different lines, and a prompt
+// that split the block would pass.
+const batchRowFollowsHeader = batchHeaderIdx >= 0
+  && batchStepLines[batchHeaderIdx + 1] === batchTsvLines[1]
+  && (batchTsvLines[1] ?? '').includes('{{REPORT_NUM}}');
+if (
+  batchTsvLines.length === 2 &&
+  batchLabelsMissing.length === 0 &&
+  batchDataFields.length === batchTsvLabels.length &&
+  batchRowFollowsHeader &&
+  /batch\/tracker-additions\//.test(batchTrackerStep) &&
+  /Write exactly two TSV lines/.test(batchTrackerStep)
+) {
+  pass('batch Step 5 specifies the headed tracker-addition format (labels, one data row, path)');
+} else {
+  fail(`batch Step 5 no longer specifies the headed TSV format — tab lines: ${batchTsvLines.length}, missing labels: ${batchLabelsMissing.join(', ') || 'none'}, labels/fields: ${batchTsvLabels.length}/${batchDataFields.length}, data row follows header: ${batchRowFollowsHeader}`);
 }
 
 const batchMachineSummary = batchPrompt.match(/#### Machine Summary[\s\S]*?### Step 3 \u2014 Save the Report/)?.[0] ?? '';
@@ -2484,6 +2834,18 @@ for (const header of ['podsumowanie zawodowe', 'doświadczenie zawodowe', 'wyksz
   }
 }
 
+// Same gap, same two shipped Chinese markets (#3658): modes/zh-TW and modes/zh
+// rendered titles the alias table could not name, so the guard was disabled AND
+// cv.sections — the documented way to correct an order — silently did nothing.
+// Both scripts are required: a CV written in either renders through this table.
+for (const header of ['專業摘要', '工作經歷', '學歷', '證照', '技能', '专业摘要', '工作经历', '学历', '证书', '项目']) {
+  if (generatePdfScript.includes(`['${header}',`)) {
+    pass(`SECTION_ALIASES maps Chinese header: ${header}`);
+  } else {
+    fail(`SECTION_ALIASES missing Chinese header: ${header}`);
+  }
+}
+
 // generate-pdf.mjs imports playwright at module scope; degrade to a warning
 // rather than crashing the suite where it is not installed.
 let pdfModule = null;
@@ -2510,6 +2872,12 @@ if (pdfModule) {
     ['Umiejetnosci', 'skills'],      // diacritics stripped
     ['Work Experience', 'experience'], // English must be unchanged
     ['Core Competencies', 'competencies'],
+    ['專業摘要', 'summary'],       // Traditional (modes/zh-TW)
+    ['工作經歷', 'experience'],
+    ['學歷', 'education'],
+    ['专业摘要', 'summary'],       // Simplified (modes/zh)
+    ['工作经历', 'experience'],
+    ['学历', 'education'],
   ];
   let keysOk = true;
   for (const [title, expected] of keyCases) {
@@ -2519,7 +2887,7 @@ if (pdfModule) {
       keysOk = false;
     }
   }
-  if (keysOk) pass(`sectionKey resolves all ${keyCases.length} PL/EN heading spellings`);
+  if (keysOk) pass(`sectionKey resolves all ${keyCases.length} PL/EN/ZH heading spellings`);
 
   // Hermetic cv.md stand-in: passed in directly, so the test does not depend on
   // a cv.md existing in the checkout (it is gitignored).
@@ -2539,6 +2907,13 @@ if (pdfModule) {
   ]);
   const enMisordered = titlesToHtml([
     'Professional Summary', 'Education', 'Work Experience',
+  ]);
+  // Education hoisted above 工作經歷 — the Chinese half of #3658.
+  const zhMisordered = titlesToHtml([
+    '專業摘要', '學歷', '工作經歷',
+  ]);
+  const zhCorrect = titlesToHtml([
+    '专业摘要', '工作经历', '学历', '证书', '技能',
   ]);
 
   const throws = (html, opts) => {
@@ -2561,6 +2936,18 @@ if (pdfModule) {
     pass('English CV order check still rejects divergence (no regression)');
   } else {
     fail('English CV order check regressed');
+  }
+
+  if (throws(zhMisordered)) {
+    pass('Traditional Chinese CV with Education before Work Experience is rejected');
+  } else {
+    fail('Traditional Chinese CV with Education before Work Experience was NOT rejected (guard is a no-op)');
+  }
+
+  if (!throws(zhCorrect)) {
+    pass('Simplified Chinese CV in cv.md order is accepted');
+  } else {
+    fail('Simplified Chinese CV in cv.md order was wrongly rejected');
   }
 
   // --allow-reorder must keep downgrading the divergence to a warning now that
@@ -2635,7 +3022,14 @@ if (shared.includes('_profile.md')) {
   // alone can't catch.
   const writingRefRe = /_shared\.md[^.\n]{0,40}(Voice DNA|Writing Style|Professional Writing)|(Voice DNA|Writing Style|Professional Writing)[^.\n]{0,40}_shared\.md/;
   const stale = [];
-  for (const f of readdirSync(join(ROOT, 'modes'), { recursive: true }).filter(p => typeof p === 'string' && p.endsWith('.md'))) {
+  // `{ recursive: true }` descends on Node's side, so there is no per-directory
+  // decision to guard — a checkout under modes/ is filtered out of the RESULT
+  // instead. Verified: a worktree there made this check fail naming that other
+  // tree's file as a stale reference of ours (#3762).
+  const modeDocs = readdirSync(join(ROOT, 'modes'), { recursive: true })
+    .filter(p => typeof p === 'string' && p.endsWith('.md'))
+    .filter(p => !isUnderNestedCheckout(join(ROOT, 'modes'), p));
+  for (const f of modeDocs) {
     const src = readFile(`modes/${f.split(/[\\/]/).join('/')}`);
     if (writingRefRe.test(src)) stale.push(f);
   }
@@ -3869,6 +4263,53 @@ if (
   fail('Chinese modes missing company-type compensation reliability checks');
 }
 
+// ── Localized oferta.md structural parity (#3669) ──
+// Six localized oferta.md files were frozen at a pre-Block-G shape: no Block G,
+// no Risk Summary, and `## G)` meaning the draft-answers block that is `## H)`
+// in the canonical. A locale WITHOUT an oferta.md falls back to the canonical
+// and gets all of it, so a stale translation is worse than none. This pins the
+// structural contract on EVERY modes/*/oferta.md: the report-format letters
+// A)–H) present, `## Risk Summary` between G) and H), and the header field
+// labels + `## Risk Summary` literal in English (the web viewer maps them by
+// name and silently drops what it does not know). The allowlist below names the
+// files still frozen; a re-synced file MUST be removed from it (the check fails
+// loudly otherwise), so the list can only shrink. Denominator asserted: the
+// locale walk must find the known files, or the whole check is blind.
+{
+  const FROZEN_OFERTA = new Set(['da', 'pl', 'pt', 'ua']);
+  const REQUIRED_HEADINGS = ['## A)', '## B)', '## C)', '## D)', '## E)', '## F)', '## G)', '## Risk Summary', '## H)'];
+  const REQUIRED_LABELS = ['**Date:**', '**URL:**', '**Archetype:**', '**Score:**', '**Legitimacy:**', '**PDF:**'];
+  const withOferta = readdirSync(join(ROOT, 'modes'), { withFileTypes: true })
+    .filter(d => d.isDirectory() && existsSync(join(ROOT, 'modes', d.name, 'oferta.md')))
+    .map(d => d.name).sort();
+  const structuralGaps = (text) => {
+    const gaps = REQUIRED_HEADINGS.filter(h => !text.includes(h)).concat(REQUIRED_LABELS.filter(l => !text.includes(l)));
+    const g = text.lastIndexOf('## G)'), rs = text.lastIndexOf('## Risk Summary'), h = text.lastIndexOf('## H)');
+    if (gaps.length === 0 && !(g < rs && rs < h)) gaps.push('order G) → Risk Summary → H)');
+    return gaps;
+  };
+  if (withOferta.length < 8 || !withOferta.includes('zh') || !withOferta.includes('ru')) {
+    fail(`localized oferta.md walk found ${withOferta.length} files (${withOferta.join(', ')}) — expected ≥8 incl. zh and ru; the parity check would be blind`);
+  } else {
+    const canonicalGaps = structuralGaps(readFile('modes/oferta.md'));
+    const stillFrozen = [], resynced = [], drifted = [];
+    for (const lang of withOferta) {
+      const gaps = structuralGaps(readFile(`modes/${lang}/oferta.md`));
+      if (FROZEN_OFERTA.has(lang)) (gaps.length === 0 ? resynced : stillFrozen).push(lang);
+      else if (gaps.length > 0) drifted.push(`${lang} (${gaps.join(', ')})`);
+    }
+    if (canonicalGaps.length > 0) {
+      fail(`canonical modes/oferta.md lost its own report-format contract: ${canonicalGaps.join(', ')}`);
+    } else if (drifted.length > 0) {
+      fail(`localized oferta.md drifted from the canonical report structure: ${drifted.join('; ')}`);
+    } else if (resynced.length > 0) {
+      fail(`localized oferta.md re-synced but still listed as frozen — remove from FROZEN_OFERTA in test-all.mjs and tick it in #3669: ${resynced.join(', ')}`);
+    } else {
+      pass(`localized oferta.md structural parity: ${withOferta.length - stillFrozen.length} of ${withOferta.length} files carry A)–H) + Risk Summary + English header labels; still frozen (allowlisted, #3669): ${stillFrozen.join(', ') || 'none'}`);
+    }
+  }
+}
+
 const batchPromptDoc = readFile('batch/batch-prompt.md');
 if (
   batchPromptDoc.includes('Company type classification (required)') &&
@@ -4074,13 +4515,21 @@ if (upskillModeDoc.includes('regenerated fresh every run, never diffed')) {
   fail('upskill trust rule 3 (ephemeral / non-versioned resources) missing');
 }
 
-// Rule 4 — write-time URL liveness via the check-liveness pattern; dead links excluded.
+// Rule 4 — resource-specific URL liveness; job-posting heuristics excluded.
 if (
   upskillModeDoc.includes('Write-time URL liveness') &&
-  upskillModeDoc.includes('liveness-core.mjs') &&
-  upskillModeDoc.includes('dead links never enter the report')
+  upskillModeDoc.includes('successful HTTP response') &&
+  upskillModeDoc.includes('non-error title') &&
+  upskillModeDoc.includes('substantive page content') &&
+  upskillModeDoc.includes('reject 4xx/5xx responses') &&
+  upskillModeDoc.includes('error/challenge pages') &&
+  upskillModeDoc.includes('empty bodies') &&
+  upskillModeDoc.includes('redirects to unrelated destinations') &&
+  upskillModeDoc.includes('job-posting-only') &&
+  upskillModeDoc.includes('must not classify learning resources') &&
+  upskillModeDoc.includes('Dead links never enter the report')
 ) {
-  pass('upskill trust rule 4: write-time URL liveness via check-liveness pattern; dead links excluded');
+  pass('upskill trust rule 4: resource-specific URL liveness; job-posting heuristic excluded');
 } else {
   fail('upskill trust rule 4 (write-time URL liveness) missing');
 }
@@ -4501,7 +4950,7 @@ try {
 // is case- and punctuation-insensitive; loadBlacklist on an absent file is a
 // no-op (empty Map — the scan filter never fires).
 try {
-  const { parseBlacklist, loadBlacklist } = await import(pathToFileURL(join(ROOT, 'scan.mjs')).href);
+  const { parseBlacklist, loadBlacklist, findBlacklistEntry } = await import(pathToFileURL(join(ROOT, 'scan.mjs')).href);
   const bl = parseBlacklist([
     '# Company Blacklist',
     '',
@@ -4509,14 +4958,15 @@ try {
     '|---------|-------|-------|--------|',
     '| Acme Corp. | 2026-01-15 | company | post-interview process signals |',
     '| Globex | 2026-02-01 | company | zero conversion |',
+    '| ibm.com | 2026-03-01 | domain | avoid parent-company ATS hosts |',
   ].join('\n'));
   const exact = bl.get('acmecorp');
   if (
-    bl.size === 2 &&
+    bl.size === 3 &&
     exact && exact.reason === 'post-interview process signals' && exact.since === '2026-01-15' &&
-    bl.has('globex') && !bl.has('company')
+    bl.has('globex') && bl.get('domain:ibm.com')?.scope === 'domain' && !bl.has('company')
   ) {
-    pass('scan.mjs parseBlacklist parses the table and keys by normalized company (#1742)');
+    pass('scan.mjs parseBlacklist parses normalized company and domain-scope rows (#1742, #4139)');
   } else {
     fail(`scan.mjs parseBlacklist wrong: size=${bl.size} keys=${[...bl.keys()].join(',')}`);
   }
@@ -4528,6 +4978,16 @@ try {
     pass('scan.mjs blacklist matching is case/punctuation-insensitive via shared normalizeCompany (#1742)');
   } else {
     fail('scan.mjs blacklist matching misses case/punctuation company variants');
+  }
+
+  const domain = bl.get('domain:ibm.com');
+  const domainMatch = findBlacklistEntry(bl, 'Confluent', 'https://jobs.ibm.com/engineering/123');
+  const boundaryMiss = findBlacklistEntry(bl, 'Confluent', 'https://notibm.com/engineering/123');
+  const legacyMatch = findBlacklistEntry(bl, 'ACME-CORP', 'https://example.com/jobs/123');
+  if (domainMatch === domain && boundaryMiss === null && legacyMatch === exact) {
+    pass('scan.mjs blacklist domain scope matches host suffixes without weakening company matching (#4139)');
+  } else {
+    fail('scan.mjs blacklist domain scope does not preserve host boundaries and legacy company matching (#4139)');
   }
 
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'career-ops-blacklist-'));
@@ -4557,6 +5017,7 @@ try {
 // scan-runs.tsv by header name, and --include-blacklisted bypasses the filter.
 if (
   scanScript.includes("args.includes('--include-blacklisted')") &&
+  scanScript.includes('findBlacklistEntry(blacklist') &&
   scanScript.includes('totalFilteredBlacklist') &&
   scanScript.includes('skipped (blacklist)') &&
   scanScript.includes('filtered_blacklist')
@@ -4675,16 +5136,18 @@ if (!fileExists('scripts/parsers/cohere_jobs.py')) {
   fail('Cohere parser example is still bundled as a runtime script');
 }
 
+// templates/portals.example.yml is copied verbatim by new users — its local-parser
+// example must point the script at a gitignored path, not the Git-tracked
+// scripts/parsers/ (see docs/local-parser-cookbook.md).
 const portalExample = readFile('templates/portals.example.yml');
 if (
-  !portalExample.includes('cohere_jobs.py') &&
-  portalExample.includes('scripts/parsers/example-js-company-jobs.js') &&
-  portalExample.includes('scripts/parsers/example_python_company_jobs.py') &&
-  portalExample.includes('already know their target careers URL')
+  portalExample.includes('script: local/example-js-company-jobs.js') &&
+  portalExample.includes('script: local/example_python_company_jobs.py') &&
+  !/^\s*#?\s*script:\s*['"]?scripts\/parsers\//m.test(portalExample)
 ) {
-  pass('portals example documents a generic local parser contract');
+  pass('portals example points the local-parser script at a gitignored path');
 } else {
-  fail('portals example still points at a bundled Cohere parser');
+  fail('portals example local-parser script is under the Git-tracked scripts/parsers/');
 }
 
 // Security hardening: command allowlist, in-repo script containment, careers_url/company validation.
@@ -4796,11 +5259,14 @@ try {
 try {
   const { filterBlacklistedOffers } = await import(pathToFileURL(join(ROOT, 'scan-ats-full.mjs')).href);
   const blacklist = new Map([
-    ['acmecorp', { company: 'Acme Corp', reason: 'example reason' }],
+    ['acmecorp', { company: 'Acme Corp', scope: 'company', reason: 'example reason' }],
+    ['ibmcom', { company: 'ibm.com', scope: 'domain', reason: 'parent ATS host' }],
   ]);
   const offers = [
     { company: 'Acme Corp.', title: 'Software Engineer', url: 'https://example.com/acme' },
     { company: 'Globex', title: 'Software Engineer', url: 'https://example.com/globex' },
+    { company: 'Confluent', title: 'Software Engineer', url: 'https://jobs.ibm.com/confluent' },
+    { company: 'Not IBM', title: 'Software Engineer', url: 'https://notibm.com/role' },
   ];
   const skipped = typeof filterBlacklistedOffers === 'function'
     ? filterBlacklistedOffers(offers, blacklist, { includeBlacklisted: false })
@@ -4809,16 +5275,19 @@ try {
     ? filterBlacklistedOffers(offers, blacklist, { includeBlacklisted: true })
     : null;
   const ok =
-    skipped?.filteredBlacklist === 1 &&
-    skipped.offers.length === 1 &&
+    skipped?.filteredBlacklist === 2 &&
+    skipped.offers.length === 2 &&
     skipped.offers[0].company === 'Globex' &&
-    audited?.annotatedBlacklisted === 1 &&
-    audited.offers.length === 2 &&
+    skipped.offers[1].company === 'Not IBM' &&
+    audited?.annotatedBlacklisted === 2 &&
+    audited.offers.length === 4 &&
     audited.offers[0].blacklisted === true &&
     audited.offers[0].note.includes('blacklisted: example reason') &&
+    audited.offers[2].blacklisted === true &&
+    audited.offers[2].note.includes('blacklisted: parent ATS host') &&
     offers[0].blacklisted === undefined;
-  if (ok) pass('scan-ats-full filters data/blacklist.md matches by default and annotates them under --include-blacklisted (#1911)');
-  else fail('scan-ats-full missing blacklist filter/audit semantics (#1911)');
+  if (ok) pass('scan-ats-full applies company and domain blacklist scopes in default and audit modes (#1911, #4139)');
+  else fail('scan-ats-full missing company/domain blacklist filter/audit semantics (#1911, #4139)');
 } catch (e) {
   fail(`scan-ats-full blacklist test crashed: ${e.message}`);
 }
@@ -5414,7 +5883,12 @@ try {
     [{ name: 'Nimbus Data', careers_url: 'https://job-boards.greenhouse.io/nimbusdata' }],
     { fetchJson: bareFetch },
   );
-  if (bare.status === 'missing' && !bare.suggested) {
+  // The refusal must still refuse: no top-level ats/slug, so nothing is adoptable
+  // and `fix-slugs` cannot write it. A refused board is REPORTED under
+  // `rejectedAlternate` (#4230), which is a record of what was found, not an
+  // invitation to use it.
+  if (bare.status === 'missing' && !bare.suggested?.ats && !bare.suggested?.slug
+      && bare.suggested?.rejectedAlternate?.ownerReason === 'owner-mismatch') {
     pass('verify-portals refuses a live board whose Greenhouse owner is a different company');
   } else {
     fail(`verify-portals adopted a mismatched owner: ${JSON.stringify(bare.suggested)}`);
@@ -5525,7 +5999,9 @@ try {
     [{ name: 'Nimbus Data', careers_url: 'https://job-boards.greenhouse.io/nimbusdata' }],
     { fetchJson: leverJson, fetchText: leverText },
   );
-  if (leverMismatch.status === 'missing' && !leverMismatch.suggested) {
+  if (leverMismatch.status === 'missing' && !leverMismatch.suggested?.ats
+      && !leverMismatch.suggested?.slug
+      && leverMismatch.suggested?.rejectedAlternate?.ownerReason === 'owner-mismatch') {
     pass('verify-portals refuses a Lever board whose page title names a different company');
   } else {
     fail(`verify-portals adopted a mismatched Lever owner: ${JSON.stringify(leverMismatch.suggested)}`);
@@ -6705,8 +7181,6 @@ if (fileExists('VERSION')) {
 
 console.log('\n12. archive-posting.mjs');
 
-const todayStr = new Date().toISOString().split('T')[0];
-
 // dry-run: URL-based company detection across each supported ATS
 for (const [url, expected] of [
   ['https://boards.greenhouse.io/openai/jobs/123', 'openai'],
@@ -6730,9 +7204,17 @@ overrideOut?.includes('Acme') && overrideOut?.includes('staff-engineer')
   ? pass('dry-run: --company and --role overrides respected')
   : fail('dry-run: --company / --role overrides not reflected in output');
 
-// dry-run: output always contains a local:jds/ reference and today's date
-const refOut = run(NODE, ['archive-posting.mjs', '--dry-run', 'https://boards.greenhouse.io/openai/jobs/123']);
-refOut?.includes('local:jds/') && refOut?.includes(todayStr)
+// dry-run: output always contains a local:jds/ reference and today's date.
+// The date the child prints is its own clock read, so it is compared against
+// the day(s) spanning the call rather than one captured up-section — see
+// runAcrossLocalDay() for why a single capture fails a run that crosses
+// midnight (#3816).
+//
+// LOCAL day, not UTC: archive-posting names its capture with localToday(), so
+// asserting the UTC day here passed only where the two agree — which is most of
+// the day in most zones, and never in the evening west of Greenwich.
+const { out: refOut, days: refDays } = runAcrossLocalDay(NODE, ['archive-posting.mjs', '--dry-run', 'https://boards.greenhouse.io/openai/jobs/123']);
+refOut?.includes('local:jds/') && refDays.some((day) => refOut?.includes(day))
   ? pass('dry-run: local:jds/ reference and date emitted')
   : fail('dry-run: reference or date missing from output');
 
@@ -6779,9 +7261,10 @@ reportSpaceOut?.includes('jds/042-') && reportSpaceOut?.toLowerCase().includes('
   ? pass('--report N: value consumed, URL still parsed')
   : fail('--report N: swallowed the URL or dropped the report number');
 
-// omitting --report leaves the historical filename shape untouched
-const noReportOut = run(NODE, ['archive-posting.mjs', '--dry-run', 'https://boards.greenhouse.io/openai/jobs/123']);
-noReportOut?.includes(`jds/${todayStr}_`)
+// omitting --report leaves the historical filename shape untouched — the date
+// in it is the LOCAL calendar day (localToday()), the day the user was working.
+const { out: noReportOut, days: noReportDays } = runAcrossLocalDay(NODE, ['archive-posting.mjs', '--dry-run', 'https://boards.greenhouse.io/openai/jobs/123']);
+noReportDays.some((day) => noReportOut?.includes(`jds/${day}_`))
   ? pass('no --report: filename shape unchanged')
   : fail('no --report: filename shape regressed');
 
@@ -7215,6 +7698,117 @@ try {
     fail('omitting block_hard must preserve the pre-existing always_allow-wins behaviour');
   }
 
+  // Case 9e: US-targeted always_allow + blocked foreign cities must not drop
+  // US homonym cities ("Dublin, OH" is Ohio, not Ireland). State names and
+  // 2-letter codes both count; the foreign counterpart still rejects.
+  const usHomonymFilter = buildLocationFilter({
+    always_allow: ['United States', 'USA'],
+    allow: [],
+    block: ['Dublin', 'Paris', 'London', 'Berlin', 'Manchester', 'Cambridge'],
+  });
+  const usHomonymPass = [
+    ['Dublin, OH', 'abbrev'],
+    ['Dublin, Ohio', 'state name'],
+    ['Paris, TX', 'Paris TX'],
+    ['London, KY', 'London KY'],
+    ['Berlin, NH', 'Berlin NH'],
+    ['Cambridge, MA', 'Cambridge MA'],
+  ];
+  const usHomonymReject = [
+    ['Dublin, Ireland', 'Dublin Ireland'],
+    ['Paris, France', 'Paris France'],
+    ['London, United Kingdom', 'London UK'],
+    ['Berlin, Germany', 'Berlin Germany'],
+    ['Cambridge, UK', 'Cambridge UK'],
+  ];
+  const usHomonymLeaks = usHomonymPass.filter(([loc]) => usHomonymFilter(loc) !== true);
+  const usHomonymMisses = usHomonymReject.filter(([loc]) => usHomonymFilter(loc) !== false);
+  if (usHomonymLeaks.length === 0) {
+    pass('US always_allow treats City, ST homonyms as US (Dublin OH / Paris TX / London KY)');
+  } else {
+    fail(`US city homonym should pass: ${usHomonymLeaks.map(([l]) => l).join('; ')}`);
+  }
+  if (usHomonymMisses.length === 0) {
+    pass('US always_allow still blocks the foreign counterpart (Dublin Ireland / Paris France)');
+  } else {
+    fail(`foreign counterpart should still reject: ${usHomonymMisses.map(([l]) => l).join('; ')}`);
+  }
+
+  // Case 9f: URL hint "City-ST" (Workday) is the same expansion.
+  if (usHomonymFilter('5 Locations', 'https://x.wd1.myworkdayjobs.com/c/job/Dublin-OH/Eng_R1') === true) {
+    pass('US state expansion applies to the URL location hint (Dublin-OH)');
+  } else {
+    fail('Workday URL hint "Dublin-OH" should pass via the USPS abbrev');
+  }
+
+  // Case 9g: genuine always_allow city still passes; block_hard still wins
+  // over the US expansion (country-level, never a false rejection).
+  const usHomonymWithCity = buildLocationFilter({
+    always_allow: ['united states', 'amsterdam'],
+    allow: [],
+    block: ['Dublin', 'Paris', 'London', 'Berlin'],
+    block_hard: ['ireland', 'brazil', 'usa'],
+  });
+  if (usHomonymWithCity('Amsterdam, Netherlands') === true) {
+    pass('genuine always_allow city (Amsterdam, Netherlands) still passes under US expansion');
+  } else {
+    fail('Amsterdam, Netherlands must still pass via always_allow amsterdam');
+  }
+  if (
+    usHomonymWithCity('Dublin, Ireland') === false &&
+    usHomonymWithCity('USA - New York - Malta') === false &&
+    usHomonymWithCity('Porto Alegre, Rio Grande do Sul, Brazil') === false
+  ) {
+    pass('block_hard still wins over US state expansion (Ireland / USA / Brazil)');
+  } else {
+    fail('block_hard must still reject country-level hits when US expansion is active');
+  }
+
+  // Case 9h: no US country token → expansion is off (EU-targeted installs).
+  const euFilter = buildLocationFilter({
+    always_allow: ['belgium', 'brussels', 'amsterdam'],
+    allow: [],
+    block: ['Dublin', 'Paris', 'London'],
+  });
+  if (
+    euFilter('Dublin, OH') === false &&
+    euFilter('Paris, TX') === false &&
+    euFilter('Amsterdam, Netherlands') === true
+  ) {
+    pass('without a US always_allow token, City, ST homonyms stay blocked (EU config unchanged)');
+  } else {
+    fail('EU-targeted always_allow must not grow USPS state matches');
+  }
+
+  // Case 9j: the other documented US country spellings trigger the same expansion.
+  const usDot = buildLocationFilter({ always_allow: ['U.S.'], block: ['Dublin'] });
+  const usDotA = buildLocationFilter({ always_allow: ['U.S.A.'], block: ['Dublin'] });
+  if (usDot('Dublin, OH') === true && usDotA('Dublin, Ohio') === true) {
+    pass('u.s. / u.s.a. always_allow tokens also expand USPS states');
+  } else {
+    fail('u.s. and u.s.a. must trigger the same US homonym rescue as United States');
+  }
+
+  // Case 9i: 2-letter codes do not match inside other words, and English
+  // "or"/"in" in a multi-location string is not Oregon/Indiana. always_allow
+  // is checked before block, so a leak would rescue these rather than reject.
+  const usAbbrevLeakFilter = buildLocationFilter({
+    always_allow: ['united states'],
+    allow: ['united states', 'usa'],
+    block: ['france', 'belgium', 'dublin', 'india'],
+  });
+  if (
+    usAbbrevLeakFilter('Remote, Belgium or France') === false &&
+    usAbbrevLeakFilter('Hyderabad, India') === false &&
+    usAbbrevLeakFilter('Dublin, India') === false &&
+    usAbbrevLeakFilter('Portland, OR') === true &&
+    usAbbrevLeakFilter('Dublin, IN') === true
+  ) {
+    pass('USPS abbrevs do not match inside India / English or-in conjunctions');
+  } else {
+    fail('state abbrevs leaked: IN/OR must not match India or "Belgium or France"');
+  }
+
   // Case 10: all-null/non-string list → empty after normalization (no false rejects)
   const allBadFilter = buildLocationFilter({ block: [null, 42, undefined], allow: ['remote'] });
   if (allBadFilter('Remote') === true) {
@@ -7470,6 +8064,9 @@ try {
   } else {
     fail('remote-title rescue changed behavior for non-remote or malformed titles');
   }
+
+  // location_filter.strict coverage lives in tests/location-filter-strict.test.mjs.
+  // Keep this central harness focused on broad scan integration behavior.
 
   if (
     shouldDedupScanHistoryRow({ firstSeen: '2026-06-01', status: 'added' }, { recheckAfterDays: 30, today: '2026-06-10' }) === true &&
@@ -7990,6 +8587,96 @@ try {
   }
 } catch (e) {
   fail(`title filter acronym tests crashed: ${e.message}`);
+}
+
+// ── 11c. TITLE FILTER OVERRIDES — per-company broadened title net ──
+console.log('\n11c. Title filter overrides (scan-ats-full.mjs per-company broadening)');
+try {
+  const { buildTitleFilterOverrides, buildTitleFilterWithOverrides, buildTitleFilter } =
+    await import(pathToFileURL(join(ROOT, 'scan.mjs')).href);
+
+  const titleFilterConfig = {
+    positive: ['instructional designer', 'edtech'],
+    negative: ['intern'],
+  };
+  const overridesConfig = [
+    {
+      companies: ['uwaterloo', 'UBC'], // mixed case — matching must be case-insensitive
+      positive_extra: ['Administrator', 'Coordinator', 'Registrar'],
+    },
+  ];
+  const overridesMap = buildTitleFilterOverrides(overridesConfig);
+  const filter = buildTitleFilterWithOverrides(titleFilterConfig, overridesMap);
+
+  // A company matching an override gets the broadened net applied.
+  if (filter('Program Administrator', 'uwaterloo') === true) {
+    pass('title_filter_overrides: an override-listed company matches on positive_extra keywords');
+  } else {
+    fail('title_filter_overrides: override-listed company should match on positive_extra');
+  }
+  if (filter('Program Administrator', 'UBC') === true) {
+    pass('title_filter_overrides: company-slug matching is case-insensitive');
+  } else {
+    fail('title_filter_overrides: company-slug matching should be case-insensitive');
+  }
+
+  // The global negative list still applies even under an override.
+  if (filter('Administrator Intern', 'uwaterloo') === false) {
+    pass('title_filter_overrides: global negative keywords still reject override matches');
+  } else {
+    fail('title_filter_overrides: global negative list should still apply under an override');
+  }
+
+  // A company NOT in any override list is completely unaffected — regression
+  // guard: the override mechanism must be a strict no-op for everyone else.
+  if (filter('Program Administrator', 'some-other-company') === false) {
+    pass('title_filter_overrides: a non-listed company is unaffected by positive_extra');
+  } else {
+    fail('title_filter_overrides: a non-listed company must not get the broadened net');
+  }
+  if (filter('Program Administrator', undefined) === false) {
+    pass('title_filter_overrides: no company slug at all behaves like the plain global filter');
+  } else {
+    fail('title_filter_overrides: missing company slug should fall back to the global filter only');
+  }
+  // Titles that already pass the global filter still pass, override or not.
+  const plain = buildTitleFilter(titleFilterConfig);
+  if (filter('Instructional Designer', 'some-other-company') === plain('Instructional Designer')) {
+    pass('title_filter_overrides: global-filter-passing titles are unaffected by the override mechanism');
+  } else {
+    fail('title_filter_overrides: global filter behavior must be identical outside overrides');
+  }
+
+  // An override with an empty/missing positive_extra doesn't crash and adds nothing.
+  const emptyOverridesMap = buildTitleFilterOverrides([
+    { companies: ['uwaterloo'], positive_extra: [] },
+    { companies: ['fanshawec'] }, // positive_extra missing entirely
+  ]);
+  const emptyFilter = buildTitleFilterWithOverrides(titleFilterConfig, emptyOverridesMap);
+  if (emptyFilter('Program Administrator', 'uwaterloo') === false && emptyFilter('Program Administrator', 'fanshawec') === false) {
+    pass('title_filter_overrides: empty/missing positive_extra does not crash and adds no matches');
+  } else {
+    fail('title_filter_overrides: empty/missing positive_extra should be a no-op, not a crash');
+  }
+
+  // Malformed title_filter_overrides (not an array, junk entries) must not crash.
+  const junkMap = buildTitleFilterOverrides('not-an-array');
+  const junkMap2 = buildTitleFilterOverrides([null, 42, { companies: 'not-an-array' }, { companies: ['x'], positive_extra: 'not-an-array' }]);
+  if (junkMap.size === 0 && junkMap2.size === 0) {
+    pass('buildTitleFilterOverrides ignores malformed title_filter_overrides without crashing');
+  } else {
+    fail('buildTitleFilterOverrides should ignore malformed entries and produce an empty map');
+  }
+
+  // No overrides at all (absent config) → identical behavior to buildTitleFilter directly.
+  const noOverridesFilter = buildTitleFilterWithOverrides(titleFilterConfig, buildTitleFilterOverrides(undefined));
+  if (noOverridesFilter('Coordinator', 'uwaterloo') === plain('Coordinator') && noOverridesFilter('Coordinator', 'uwaterloo') === false) {
+    pass('title_filter_overrides: absent title_filter_overrides is a strict no-op');
+  } else {
+    fail('title_filter_overrides: absent config should behave exactly like buildTitleFilter alone');
+  }
+} catch (e) {
+  fail(`title filter overrides tests crashed: ${e.message}`);
 }
 
 // ── 12. FOLLOW-UP CADENCE LOGIC ─────────────────────────────────
@@ -9417,6 +10104,169 @@ try {
     pass('all headless evaluators use the shared atomic report allocator');
   } else {
     fail(`headless evaluators still carry private max+1 allocators: ${unmigratedEvaluators.join(', ')}`);
+  }
+
+  // Same family, second contract (#3707): every headless evaluator persists its
+  // evaluation as a TSV in batch/tracker-additions, so merge-tracker.mjs applies
+  // dedup, status validation, report-link normalization and the tracker lock
+  // (AGENTS.md Pipeline Integrity rule 1). openai-eval/ollama-eval used to print
+  // a markdown row for the user to paste into data/applications.md instead --
+  // 8 cells against a 9-column tracker, which every reader's width guard drops
+  // as a non-data line, so the pasted evaluation vanished and verify-pipeline
+  // still reported the tracker clean.
+  //
+  // The sink is expressed as the #3706 contract rather than as per-file patterns:
+  // a write call whose payload interpolates a header constant, a newline, then
+  // the row. Patterns naming each file's own variables went stale the moment
+  // #3706 rewrote gemini-eval and openrouter-runner to emit TSV_ADDITION_HEADER
+  // -- they reported "bypasses the tracker-addition path" against a tree where
+  // both persist correctly, a false alarm on files this PR does not own. Keying
+  // on the shared contract means the check tracks the contract, not the spelling.
+  // Presence of the string "tracker-additions" is deliberately NOT the test: a
+  // comment satisfies that.
+  const writeSinkRe = /write(?:File|FileSync)\([\s\S]{0,200}?\$\{[A-Za-z0-9_]*(?:HEADER|Header)\}\\n\$\{([^}]+)\}/;
+  // ...and the payload has to BE the row. Accepting any identifier let a mutation
+  // that replaced `${trackerFields.join('\t')}` with `${placeholder}` pass, which
+  // is the failure-wearing-a-pass this check exists to stop. Either the join is
+  // inline, or the named variable's own definition is tab-separated
+  // (openrouter-runner builds `tsvLine` a line earlier).
+  // Comments are stripped first: a commented-out writeFileSync block still
+  // matches the raw source, so the harness would pass while the evaluator wrote
+  // nothing -- the failure-wearing-a-pass this check exists to stop. Only
+  // whole-line comments are removed, deliberately: a naive `//`-to-end-of-line
+  // strip also eats the `//` inside every `https://` string literal, which is
+  // its own way of misreading the file. Commented-out code is whole lines.
+  const executable = (source) => source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter(line => !/^\s*\/\//.test(line))
+    .join('\n');
+  const writesTheRow = (rawSource) => {
+    const source = executable(rawSource);
+    const sink = source.match(writeSinkRe);
+    if (!sink) return false;
+    const payload = sink[1].trim();
+    if (/\.join\('\\t'\)$/.test(payload)) return true;
+    const defined = source.match(new RegExp(`const\\s+${payload.replace(/[^A-Za-z0-9_]/g, '')}\\s*=[^;]*`));
+    return Boolean(defined && defined[0].includes('\\t'));
+  };
+  const pastedRowRe = /Tracker entry \(add to|console\.log\(`[^`]*\|\s*\$\{num\}\s*\|/;
+  const unpersistedEvaluators = evaluatorSources
+    .filter(([, source]) => !writesTheRow(source) || pastedRowRe.test(source))
+    .map(([name]) => name);
+  if (unpersistedEvaluators.length === 0) {
+    pass('all headless evaluators write their addition to disk, none dictates a hand-pasted row');
+  } else {
+    fail(`headless evaluators bypass the tracker-addition path: ${unpersistedEvaluators.join(', ')}`);
+  }
+
+  // The addition itself must carry all nine columns in the TSV contract's order
+  // (status BEFORE score) -- the two evaluators converted in #3707 build the row
+  // from a literal, so pin the field list rather than only the directory.
+  const nineFieldRe = new RegExp([
+    'const trackerFields = \\[',
+    "String\\(parseInt\\(num, 10\\)\\),",
+    'today,',
+    'tsvSafe\\(company\\),',
+    'tsvSafe\\(role\\),',
+    "'Evaluated',",
+    'normalizedTrackerScore\\(score\\),',
+    "'❌',",
+    '`\\[\\$\\{num\\}\\]\\(reports/\\$\\{filename\\}\\)`,',
+    'tsvSafe\\(`[^`]*\\$\\{modelName\\}[^`]*`\\),',
+    '\\];',
+  ].join('\\s*'));
+  const wrongShape = ['openai-eval.mjs', 'ollama-eval.mjs']
+    .filter(name => !nineFieldRe.test(readFile(name)));
+  if (wrongShape.length === 0) {
+    pass('openai-eval and ollama-eval build the nine-column addition with status before score');
+  } else {
+    fail(`tracker addition fields wrong or reordered in: ${wrongShape.join(', ')}`);
+  }
+
+  // Same family, second contract (#3795): every headless evaluator writes
+  // `**URL:**` into its report header, per AGENTS.md Pipeline Integrity rule 3.
+  // The report is where the posting URL survives the posting, and it is the only
+  // place merge-tracker.mjs's resolveReportUrl() looks -- a report without the
+  // line yields `no-url`, so the row can never be backfilled and stays outside
+  // the deterministic URL dedup key, the tier merge-tracker tries FIRST and the
+  // one that can prove two same-title rows are different openings.
+  //
+  // Two halves, because the line is worthless without a value to put in it:
+  // the header must be written, AND the evaluator must have somewhere to
+  // receive a posting URL from. Absent one, `(pasted)` is the honest value and
+  // keeps the field present; normalizeUrl derives no key from it, so it cannot
+  // hand every pasted row the same key.
+  // Both halves run over comment-stripped source (`executable`, above), and the
+  // header must carry an INTERPOLATED value rather than a bare literal: a
+  // comment mentioning `**URL:**`, or a hardcoded line with nothing substituted
+  // into it, would otherwise satisfy a raw-source scan while the report shipped
+  // no URL -- a failure wearing a pass. Every writer today interpolates
+  // (`**URL:** ${postingUrl || '(pasted)'}`, `**URL:** ${url}`), so requiring it
+  // ties the header to a value reaching the report write path.
+  const urlHeaderRe  = /\*\*URL:\*\*[^\n]*\$\{/;
+  const urlSourceRe  = /--posting-url|\bpostingUrl\b|\$\{input \|\| '\(pasted\)'\}/;
+  // Empty since #3797 landed the header in openai-eval.mjs and ollama-eval.mjs,
+  // the two files it exempted. The list is asserted to be EXACTLY the files still
+  // missing the header, so leaving the names here would fail as a stale
+  // exemption -- which is what that guard is for. Kept rather than deleted: the
+  // next evaluator added without a URL header has somewhere to be named
+  // deliberately, instead of the check being quietly weakened to accommodate it.
+  const pendingUrlHeader = [];
+  const missingUrlHeader = evaluatorSources
+    .map(([name, source]) => [name, executable(source)])
+    .filter(([, source]) => !urlHeaderRe.test(source) || !urlSourceRe.test(source))
+    .map(([name]) => name);
+  const staleExemptions = pendingUrlHeader.filter(name => !missingUrlHeader.includes(name));
+  const unexemptedGaps  = missingUrlHeader.filter(name => !pendingUrlHeader.includes(name));
+  if (unexemptedGaps.length > 0) {
+    fail(`headless evaluators write a report with no **URL:** header, so their rows can never reach the URL dedup key: ${unexemptedGaps.join(', ')}`);
+  } else if (staleExemptions.length > 0) {
+    fail(`stale #3797 exemption — these now carry the **URL:** header, remove them from pendingUrlHeader: ${staleExemptions.join(', ')}`);
+  } else {
+    pass('every headless evaluator outside the #3797 exemption writes **URL:** and takes a posting URL');
+  }
+
+  // Same family, third contract (#3796): the tracker-addition helpers are
+  // imported, never redefined. Four evaluators carried private copies of
+  // `tsvSafe` / `normalizedTrackerScore` and they drifted -- gemini-eval.mjs's
+  // concatenated instead of parsing, so `SCORE: 4.2 (strong fit)` produced
+  // `4.2 (strong fit)/5`, which is neither a score nor a sentinel and is the
+  // undecidable cell merge-tracker.mjs refuses outright. The evaluation was
+  // skipped wholly while the sibling copy had been immune all along.
+  //
+  // tests/evaluator-score-cell.test.mjs asserts the helpers exist exactly once;
+  // this asserts the family reaches that one definition, which is the half a
+  // fifth evaluator can fail without redefining anything -- by hand-rolling a
+  // score cell inline instead, which is exactly what openrouter-runner.mjs did:
+  // it never held a copy, so a copy-scan never saw it, while it wrote
+  // `${value.toFixed(1)}/5` from a numeric prefix that discarded the
+  // denominator, and the empty string when nothing parsed.
+  //
+  // USE, not merely import: an evaluator can import an unrelated helper from the
+  // module and still build its score cell by hand, which would pass an
+  // import-only check while the behaviour this contract exists to protect had
+  // drifted again. Both halves are required -- the import proves it reaches the
+  // shared definition, the call proves it is the definition actually used.
+  const ADDITION_HELPERS = './lib/tracker-addition.mjs';
+  const helperImportRe = /from\s+'\.\/lib\/tracker-addition\.mjs'/;
+  const helperUseRe    = /\bnormalizedTrackerScore\s*\(/;
+  // Empty, and it should stay that way. #3797 landed while this branch was open
+  // and re-added copies to openai-eval.mjs and ollama-eval.mjs; both were
+  // consolidated on the merge, which is the exemption being spent rather than
+  // renewed. A new name here needs a reason with an issue number attached.
+  const pendingHelperImport = [];
+  const missingHelperImport = evaluatorSources
+    .filter(([, source]) => !helperImportRe.test(source) || !helperUseRe.test(source))
+    .map(([name]) => name);
+  const staleHelperExemptions = pendingHelperImport.filter(name => !missingHelperImport.includes(name));
+  const unexemptedHelperGaps  = missingHelperImport.filter(name => !pendingHelperImport.includes(name));
+  if (unexemptedHelperGaps.length > 0) {
+    fail(`headless evaluators build their tracker-addition cells without importing AND calling ${ADDITION_HELPERS}'s normalizedTrackerScore, the drift #3796 consolidated: ${unexemptedHelperGaps.join(', ')}`);
+  } else if (staleHelperExemptions.length > 0) {
+    fail(`stale #3796 exemption — these now import ${ADDITION_HELPERS}, remove them from pendingHelperImport: ${staleHelperExemptions.join(', ')}`);
+  } else {
+    pass(`every headless evaluator outside the #3796 exemption imports AND calls the shared tracker-addition helpers`);
   }
 
   // --count N: contiguous range from an empty dir.
@@ -12104,11 +12954,15 @@ try {
     // to LEGACY_COLMAP (#2274). On a plain 9-column table the fallback happens
     // to line up and hides the bug; with a Location column inserted, the Score
     // cell is read from Location instead — an ES tracker scored "Remote".
+    // `date` is not in REQUIRED_HEADER_FIELDS, so a missing `fecha` alias does
+    // not fail the header — it resolves with no date column and every row comes
+    // back with an empty date (#3705). Assert the Fecha column is actually
+    // resolved, not silently absent.
     const trackerParse = await import(pathToFileURL(join(ROOT, 'tracker-parse.mjs')).href);
     const esHeader = '| # | Fecha | Empresa | Puesto | Location | Score | Status | PDF | Report | Notes |';
     const esMap = trackerParse.detectColumns([esHeader]);
-    if (esMap && esMap.score === 6 && esMap.company === 3 && esMap.role === 4 && esMap.location === 5) {
-      pass('a fully localized header maps through the alias table (#2274)');
+    if (esMap && esMap.date === 2 && esMap.score === 6 && esMap.company === 3 && esMap.role === 4 && esMap.location === 5) {
+      pass('a fully localized header maps through the alias table (#2274, #3705)');
     } else {
       fail(`localized header did not map: ${JSON.stringify(esMap)}`);
     }
@@ -12414,7 +13268,7 @@ try {
   rmSync(ready, { recursive: true, force: true });
 
   // Auto-copy template: when modes/_profile.md or modes/_custom.md is missing but template exists,
-  // doctor --json auto-copies them, records them in autoCopied, and does not report them as missing (#1369).
+  // doctor --json --init-templates copies them, records them in autoCopied, and does not report them as missing (#1369).
   const autoCopy = mkdtempSync(join(tmpdir(), 'co-autocopy-'));
   mkdirSync(join(autoCopy, 'config'), { recursive: true });
   mkdirSync(join(autoCopy, 'modes'), { recursive: true });
@@ -12423,7 +13277,7 @@ try {
   }
   writeFileSync(join(autoCopy, 'modes/_profile.template.md'), '# profile template\n');
   writeFileSync(join(autoCopy, 'modes/_custom.template.md'), '# custom template\n');
-  const ac = JSON.parse(run(NODE, ['doctor.mjs', '--json', '--target', autoCopy]) || '{}');
+  const ac = JSON.parse(run(NODE, ['doctor.mjs', '--json', '--init-templates', '--target', autoCopy]) || '{}');
   if (
     ac.onboardingNeeded === false &&
     Array.isArray(ac.missing) &&
@@ -12436,9 +13290,9 @@ try {
     existsSync(join(autoCopy, 'modes/_custom.md')) &&
     readFileSync(join(autoCopy, 'modes/_custom.md'), 'utf-8') === '# custom template\n'
   ) {
-    pass('Auto-copy template → modes/_profile.md and modes/_custom.md copied silently in --json mode (#1369)');
+    pass('Explicit onboarding → modes/_profile.md and modes/_custom.md copied with --init-templates (#1369)');
   } else {
-    fail(`Auto-copy template failed in --json mode: ${JSON.stringify(ac)}`);
+    fail(`Template initialization failed: ${JSON.stringify(ac)}`);
   }
   rmSync(autoCopy, { recursive: true, force: true });
 
@@ -12621,7 +13475,11 @@ try {
     join(withMcp, '.claude', 'settings.json'),
     JSON.stringify({ mcpServers: { playwright: { command: 'npx', args: ['@playwright/mcp', '--headless'] } } }),
   );
-  const b = JSON.parse(run(NODE, ['doctor.mjs', '--json', '--target', withMcp], doctorEnv) || '{}');
+  const b = JSON.parse(execFileSync(
+    NODE,
+    [join(ROOT, 'doctor.mjs'), '--json', '--target', withMcp],
+    { ...doctorEnv, cwd: withMcp, encoding: 'utf8' },
+  ) || '{}');
   if (Array.isArray(b.warnings) && !b.warnings.some((w) => /playwright mcp/i.test(w))) {
     pass('Playwright MCP configured → no warning');
   } else {
@@ -12636,7 +13494,11 @@ try {
     join(withLocalMcp, '.claude', 'settings.local.json'),
     JSON.stringify({ mcpServers: { browser: { command: 'npx', args: ['@playwright/mcp'] } } }),
   );
-  const c = JSON.parse(run(NODE, ['doctor.mjs', '--json', '--target', withLocalMcp], doctorEnv) || '{}');
+  const c = JSON.parse(execFileSync(
+    NODE,
+    [join(ROOT, 'doctor.mjs'), '--json', '--target', withLocalMcp],
+    { ...doctorEnv, cwd: withLocalMcp, encoding: 'utf8' },
+  ) || '{}');
   if (Array.isArray(c.warnings) && !c.warnings.some((w) => /playwright mcp/i.test(w))) {
     pass('Playwright MCP configured via .claude/settings.local.json → no warning');
   } else {
@@ -13410,7 +14272,9 @@ try {
     fail('section-count check did not flag a CV with too few sections');
   }
 
-  // CJK content must be rejected with actionable guidance.
+  // CJK content must be rejected with actionable guidance when no CJK-capable
+  // engine/template is in play (pdflatex-only, or no engine resolved at all —
+  // whatever this CI box actually has on PATH).
   const cjk = latexValidate(baseTex('職務経歴'));
   if (cjk && cjk.issues.some((i) => /CJK/.test(i)) && cjk.valid === false) {
     pass('CJK content is rejected with guidance to use pdf mode');
@@ -13419,6 +14283,129 @@ try {
   }
 } catch (e) {
   fail(`LaTeX validator i18n test crashed: ${e.message}`);
+}
+
+// ── 20a. LATEX CJK TEMPLATE (tectonic path, #3553) ──────────────
+// This drives validateLatexContent() directly with a forced `engine` value
+// so the tectonic-vs-pdflatex branch is deterministic regardless of what
+// LaTeX engine (if any) is actually installed on the machine running the
+// suite — see generate-latex.mjs's resolveLatexEngine()/CJK_PACKAGE_RE.
+
+console.log('\n20a. LaTeX CJK template (tectonic engine path)');
+
+try {
+  const { validateLatexContent } = await import(pathToFileURL(join(ROOT, 'generate-latex.mjs')).href);
+
+  const cjkTemplatePath = join(ROOT, 'templates', 'cv-template.cjk.tex');
+  if (fileExists(join('templates', 'cv-template.cjk.tex'))) {
+    pass('templates/cv-template.cjk.tex exists');
+  } else {
+    fail('templates/cv-template.cjk.tex is missing');
+  }
+  const cjkTemplateSrc = existsSync(cjkTemplatePath) ? readFileSync(cjkTemplatePath, 'utf-8') : '';
+  if (/\\usepackage\{fontspec\}/.test(cjkTemplateSrc) && /\\usepackage\{xeCJK\}/.test(cjkTemplateSrc) && /\\setCJKmainfont\{/.test(cjkTemplateSrc)) {
+    pass('cv-template.cjk.tex loads fontspec + xeCJK + a CJK main font');
+  } else {
+    fail('cv-template.cjk.tex is missing fontspec/xeCJK/\\setCJKmainfont');
+  }
+  // Same required commands/placeholders as the base template — it must stay
+  // a drop-in variant, not a divergent structure.
+  const requiredTokens = ['\\resumeSubheading', '\\resumeItem', '\\resumeProjectHeading', '{{NAME}}', '{{EDUCATION}}', '{{EXPERIENCE}}', '{{PROJECTS}}', '{{AWARDS}}', '{{SKILLS}}'];
+  const missingTokens = requiredTokens.filter((t) => !cjkTemplateSrc.includes(t));
+  if (cjkTemplateSrc && missingTokens.length === 0) {
+    pass('cv-template.cjk.tex keeps the same required commands/placeholders as the base template');
+  } else {
+    fail(`cv-template.cjk.tex is missing tokens: ${JSON.stringify(missingTokens)}`);
+  }
+
+  const cjkFilledTemplate = () => cjkTemplateSrc
+    .replace(/\{\{NAME\}\}/g, 'Test Candidate')
+    .replace(/\{\{CONTACT_LINE\}\}/g, 'Toronto, ON')
+    .replace(/\{\{EMAIL_URL\}\}/g, 'test@example.com')
+    .replace(/\{\{EMAIL_DISPLAY\}\}/g, 'test@example.com')
+    .replace(/\{\{LINKEDIN_URL\}\}/g, 'https://linkedin.com/in/test')
+    .replace(/\{\{LINKEDIN_DISPLAY\}\}/g, 'linkedin.com/in/test')
+    .replace(/\{\{GITHUB_URL\}\}/g, 'https://github.com/test')
+    .replace(/\{\{GITHUB_DISPLAY\}\}/g, 'github.com/test')
+    .replace(/\{\{EDUCATION\}\}/g, '    \\resumeSubheading\n      {示例大学}{Toronto, ON}\n      {计算机科学硕士学位}{2023 - 2025}')
+    .replace(/\{\{EXPERIENCE\}\}/g, '    \\resumeSubheading\n      {示例公司}{2022 - Present}\n      {软件工程师}{Remote}\n      \\resumeItemListStart\n            \\resumeItem{设计并交付了多个内部工具}\n      \\resumeItemListEnd')
+    .replace(/\{\{PROJECTS\}\}/g, '    \\resumeProjectHeading\n      {\\textbf{示例项目}}{2024}\n      \\resumeItemListStart\n            \\resumeItem{构建了一个交互式数据分析平台}\n      \\resumeItemListEnd')
+    .replace(/\{\{AWARDS\}\}/g, '    \\resumeProjectHeading\n      {\\textbf{优秀毕业生奖}}{2024}')
+    .replace(/\{\{SKILLS\}\}/g, '        \\textbf{语言}{: 中文，英语} \\\\');
+
+  // A CJK-filled cv-template.cjk.tex, resolved to tectonic, must NOT be
+  // blocked — the whole point of #3553 is that this path now compiles.
+  const filled = cjkFilledTemplate();
+  const tectonicCjk = validateLatexContent(filled, false, 'tectonic');
+  if (tectonicCjk.issues.length === 0) {
+    pass('CJK content + xeCJK template + tectonic engine validates clean (no CJK block)');
+  } else {
+    fail(`CJK content + xeCJK template + tectonic engine was unexpectedly blocked: ${JSON.stringify(tectonicCjk.issues)}`);
+  }
+
+  // CJK content on tectonic WITHOUT the CJK package loaded (e.g. someone
+  // pastes CJK text into the base cv-template.tex) must still be blocked,
+  // but with guidance pointing at --template=cjk instead of only "use pdf mode".
+  const baseTemplateWithCjk = baseTex('職務経歴');
+  const tectonicNoPackage = validateLatexContent(baseTemplateWithCjk, false, 'tectonic');
+  if (tectonicNoPackage.issues.some((i) => /CJK/.test(i) && /--template=cjk/.test(i))) {
+    pass('CJK content on tectonic without xeCJK/ctex loaded is blocked with --template=cjk guidance');
+  } else {
+    fail(`CJK content on tectonic without CJK package was not blocked with the expected guidance: ${JSON.stringify(tectonicNoPackage.issues)}`);
+  }
+
+  // The pdflatex-only guard must not regress: even the CJK-aware template
+  // (xeCJK loaded) stays blocked when the resolved engine is pdflatex, since
+  // pdflatex has no Unicode/CJK font support regardless of packages loaded.
+  const pdflatexCjk = validateLatexContent(filled, false, 'pdflatex');
+  if (pdflatexCjk.issues.some((i) => /CJK/.test(i))) {
+    pass('CJK content stays blocked on pdflatex even with the CJK template (pdflatex cannot render CJK)');
+  } else {
+    fail(`CJK content should stay blocked on pdflatex: ${JSON.stringify(pdflatexCjk.issues)}`);
+  }
+
+  // No engine resolved at all (engine=null) — same as the pre-#3553 default.
+  const noEngineCjk = validateLatexContent(filled, false, null);
+  if (noEngineCjk.issues.some((i) => /CJK/.test(i))) {
+    pass('CJK content stays blocked when no LaTeX engine is resolved');
+  } else {
+    fail(`CJK content should stay blocked with no engine resolved: ${JSON.stringify(noEngineCjk.issues)}`);
+  }
+
+  // Supplementary-plane ideographs (CJK Unified Ideographs Extension B and
+  // later, e.g. U+20000) must be caught too, not just the BMP ranges — a
+  // codepoint-range regex without the `u` flag only ever sees lone UTF-16
+  // surrogate halves for these and silently misses them (CodeRabbit finding).
+  const supplementaryChar = String.fromCodePoint(0x20000);
+  const supplementaryCjk = validateLatexContent(baseTex(supplementaryChar), false, null);
+  if (supplementaryCjk.issues.some((i) => /CJK/.test(i))) {
+    pass('supplementary-plane CJK ideograph (U+20000) is detected, not just BMP CJK');
+  } else {
+    fail(`supplementary-plane CJK ideograph (U+20000) was not detected: ${JSON.stringify(supplementaryCjk.issues)}`);
+  }
+
+  // CJK_PACKAGE_RE must recognize xeCJK/ctex as part of a comma-separated
+  // \usepackage list, not only as the package's sole argument.
+  const listFormTex = baseTex('職務経歴').replace('\\documentclass{article}', '\\documentclass{article}\n\\usepackage{fontspec,xeCJK}');
+  const listFormResult = validateLatexContent(listFormTex, false, 'tectonic');
+  if (listFormResult.issues.length === 0) {
+    pass('\\usepackage{fontspec,xeCJK} (comma-separated list) is recognized as loading xeCJK');
+  } else {
+    fail(`comma-separated \\usepackage list with xeCJK was not recognized: ${JSON.stringify(listFormResult.issues)}`);
+  }
+
+  // CJK_PACKAGE_RE must also recognize the ctex bundle's own document classes
+  // (ctexart/ctexrep/ctexbook), which auto-configure CJK support without a
+  // separate \usepackage{xeCJK} line.
+  const ctexClassTex = baseTex('職務経歴').replace('\\documentclass{article}', '\\documentclass[fontset=windows]{ctexart}');
+  const ctexClassResult = validateLatexContent(ctexClassTex, false, 'tectonic');
+  if (ctexClassResult.issues.length === 0) {
+    pass('\\documentclass{ctexart} (ctex document class) is recognized as CJK-capable');
+  } else {
+    fail(`ctex document class was not recognized as CJK-capable: ${JSON.stringify(ctexClassResult.issues)}`);
+  }
+} catch (e) {
+  fail(`LaTeX CJK template test crashed: ${e.message}`);
 }
 
 // ── 20b. LATEX-TEX IN-PLACE TAILORING ───────────────────────────
@@ -14355,6 +15342,126 @@ try {
   fail(`scan Unicode dedup/match key tests crashed: ${e.message}`);
 }
 
+// ── 46. Keyword coverage (ATS match) ────────────────────────────
+console.log('\n46. Keyword coverage (ATS match)');
+
+try {
+  const { analyzeCoverage, extractKeywords, countOccurrences, variantForms, htmlToText } =
+    await import(pathToFileURL(join(ROOT, 'keyword-match.mjs')).href);
+
+  const cv = [
+    'Senior engineer. Built Python services with FastAPI. Python remains my primary language.',
+    'Deployed on k8s. Owned CI/CD pipelines. Wrote C++ modules and some JavaScript.',
+    'Strong in machine  learning and PostgreSQL. Set up observability once.',
+  ].join('\n');
+  const keywords = ['Python', 'FastAPI', 'Kubernetes', 'CI/CD', 'C++',
+    'Machine Learning', 'Postgres', 'observability', 'Java', 'gRPC'];
+  const r = analyzeCoverage(keywords, cv);
+
+  if (r.present.includes('Python')) pass('keyword coverage: exact match (Python)');
+  else fail('keyword coverage: Python should be present');
+
+  if (!r.thin.includes('Python')) pass('keyword coverage: count>1 keyword not flagged thin (Python x2)');
+  else fail('keyword coverage: Python appears twice and must not be thin');
+
+  if (r.present.includes('Kubernetes')) pass('keyword coverage: synonym match (k8s -> Kubernetes)');
+  else fail('keyword coverage: Kubernetes should match via k8s synonym');
+
+  if (r.present.includes('Machine Learning')) pass('keyword coverage: case + collapsed-whitespace match');
+  else fail('keyword coverage: Machine Learning should match "machine  learning"');
+
+  if (r.present.includes('C++') && r.present.includes('CI/CD')) pass('keyword coverage: symbol-bearing keywords match (C++, CI/CD)');
+  else fail('keyword coverage: C++ / CI/CD should match');
+
+  if (r.present.includes('Postgres')) pass('keyword coverage: synonym match (PostgreSQL -> Postgres)');
+  else fail('keyword coverage: Postgres should match via postgresql synonym');
+
+  if (!r.present.includes('Java') && r.missing.includes('Java')) pass('keyword coverage: word boundary holds (Java != JavaScript)');
+  else fail('keyword coverage: Java must not match inside JavaScript');
+
+  if (r.missing.includes('gRPC')) pass('keyword coverage: genuine miss reported (gRPC)');
+  else fail('keyword coverage: gRPC should be missing');
+
+  if (r.thin.includes('observability')) pass('keyword coverage: count-1 keyword flagged thin (observability)');
+  else fail('keyword coverage: observability should be thin');
+
+  if (r.coveragePct === 80) pass('keyword coverage: percentage computed correctly (8/10 = 80%)');
+  else fail(`keyword coverage: percentage wrong: ${r.coveragePct} (expected 80)`);
+
+  if (countOccurrences('java', 'javascript and java') === 1) pass('keyword coverage: countOccurrences respects word boundaries');
+  else fail(`keyword coverage: countOccurrences boundary wrong: ${countOccurrences('java', 'javascript and java')}`);
+
+  if (!variantForms('aws').includes('aw') && !variantForms('k8s').includes('k8')) pass('keyword coverage: variantForms does not truncate short acronyms (aws, k8s)');
+  else fail(`keyword coverage: variantForms truncates acronyms: ${JSON.stringify(variantForms('aws'))}`);
+
+  const stripped = htmlToText('<style>.x{}</style><p>Python &amp; <b>gRPC</b></p>');
+  if (stripped === 'Python & gRPC') pass('keyword coverage: htmlToText strips tags/style and decodes entities');
+  else fail(`keyword coverage: htmlToText wrong: ${JSON.stringify(stripped)}`);
+
+  // Adversarial: a nested entity must resolve to the literal text "&lt;" (guards the
+  // &amp;-decoded-last fix, so it is not re-decoded into a "<" tag char), and a
+  // comment-sheltered or attribute-laden <script> must still be stripped (tag-filter fix).
+  const hardened = htmlToText('<!--<script>x</script>--><script type="text/js">evil()</script>a &amp;lt;b&gt; c');
+  if (hardened === 'a &lt;b> c') pass('keyword coverage: htmlToText resists nested-entity + sheltered-script bypass');
+  else fail(`keyword coverage: htmlToText hardening wrong: ${JSON.stringify(hardened)}`);
+
+  const htmlCv = '<html><body><h2>Summary</h2><p>Built Python and gRPC services.</p></body></html>';
+  const rHtml = analyzeCoverage(['Python', 'gRPC', 'Java'], htmlToText(htmlCv));
+  if (rHtml.coveragePct === 67 && rHtml.present.includes('gRPC')) pass('keyword coverage: scans text extracted from tailored HTML');
+  else fail(`keyword coverage: HTML scan wrong: ${JSON.stringify(rHtml)}`);
+
+  const kws = extractKeywords('## Keywords extracted\n- Python\n- FastAPI, gRPC\n\n## Next');
+  if (kws.length === 3 && kws[0] === 'Python' && kws[2] === 'gRPC') pass('keyword coverage: extractKeywords parses bullets + commas, stops at next heading');
+  else fail(`keyword coverage: extractKeywords wrong: ${JSON.stringify(kws)}`);
+
+  // Negative-path CLI: --self-test never touches the report/CV file-resolution path,
+  // so exercise it directly. A nonexistent report (and a no-arg invocation) must fail
+  // GRACEFULLY — clean exit 1 + a readable message, never an uncaught stack trace.
+  const kmCli = join(ROOT, 'keyword-match.mjs');
+  const noStack = (s) => !/\n\s+at\s/.test(s); // Node prints "    at <frame>" on an uncaught throw
+  const runCli = (argv) => {
+    try {
+      execFileSync(NODE, [kmCli, ...argv], { cwd: ROOT, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000 });
+      return { status: 0, stderr: '' };
+    } catch (e) {
+      return { status: e.status, stderr: (e.stderr || '').toString() };
+    }
+  };
+
+  const missing = runCli([join(ROOT, '.tmp-test-no-such-report.md')]);
+  if (missing.status === 1 && /not found/i.test(missing.stderr) && noStack(missing.stderr)) {
+    pass('keyword coverage: CLI exits 1 with a clean message on a missing report file');
+  } else {
+    fail(`keyword coverage: CLI missing-report handling wrong: status=${missing.status} stderr=${JSON.stringify(missing.stderr)}`);
+  }
+
+  const noArg = runCli([]);
+  if (noArg.status === 1 && /Usage:/i.test(noArg.stderr) && noStack(noArg.stderr)) {
+    pass('keyword coverage: CLI prints usage + exits 1 when no report arg is given');
+  } else {
+    fail(`keyword coverage: CLI no-arg handling wrong: status=${noArg.status} stderr=${JSON.stringify(noArg.stderr)}`);
+  }
+
+  // A mistyped flag or a stray second path must fail fast instead of silently
+  // producing Markdown when JSON was asked for (both rejected before any file I/O).
+  const unknownOpt = runCli(['--jsno']);
+  if (unknownOpt.status === 1 && /Unknown option: --jsno/.test(unknownOpt.stderr) && noStack(unknownOpt.stderr)) {
+    pass('keyword coverage: CLI rejects an unknown option with exit 1');
+  } else {
+    fail(`keyword coverage: CLI unknown-option handling wrong: status=${unknownOpt.status} stderr=${JSON.stringify(unknownOpt.stderr)}`);
+  }
+
+  const extraArg = runCli(['first-report.md', 'second-report.md']);
+  if (extraArg.status === 1 && /Unexpected argument: second-report\.md/.test(extraArg.stderr) && noStack(extraArg.stderr)) {
+    pass('keyword coverage: CLI rejects an extra positional argument with exit 1');
+  } else {
+    fail(`keyword coverage: CLI extra-argument handling wrong: status=${extraArg.status} stderr=${JSON.stringify(extraArg.stderr)}`);
+  }
+
+} catch (e) {
+  fail(`keyword coverage tests crashed: ${e.message}`);
+}
+
 // ── Plugin engine (contract + sandbox + firewall) ────────────────
 console.log('\n49. Plugin engine (contract + sandbox + firewall)');
 
@@ -14695,6 +15802,11 @@ try {
   const walkMjs = (d) => {
     for (const e of readdirSync(d, { withFileTypes: true })) {
       const fp = join(d, e.name);
+      // NO nested-checkout guard here, deliberately — see the EXEMPT map in
+      // tests/mjs-files.test.mjs. This is a security scan over third-party
+      // code, so skipping a directory that carries a `.git` marker would let a
+      // plugin drop a `.git` file beside its sources and opt straight out of
+      // the deny-list. Same reasoning as plugins/_lock.mjs (#3762).
       if (e.isDirectory()) walkMjs(fp);
       else if (e.name.endsWith('.mjs')) allPluginMjs.push(fp);
     }
@@ -15282,6 +16394,36 @@ try {
     } else {
       fail('the web _days key mapping no longer lines up with the core cadenceDefaults keys (#2369)');
     }
+    // The defaults are a CONSTANT, so an empty tracker must not withhold them.
+    // That is the first-run state (onboarding creates a header-only tracker),
+    // and it is precisely when the web form has no profile overrides to fall
+    // back on, so a missing baseline leaves every field blank (#4005).
+    const emptyEmitted = analyzeFromContent(
+      '# Applications Tracker\n\n| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n' +
+      '|---|------|---------|------|-------|--------|-----|--------|-------|\n',
+      '',
+    );
+    const emptyDefaults = emptyEmitted?.cadenceDefaults;
+    // Value equality, not just shape. Returning CADENCE here (defaults PLUS the
+    // user's profile overrides) would satisfy every structural check while
+    // handing the form one of the user's own overrides as the baseline they
+    // would be reverting to, which is the #2369 mistake exactly.
+    const emptyOk = emptyDefaults && typeof emptyDefaults === 'object'
+      && Object.keys(emptyDefaults).length === cadKeys.length
+      && cadKeys.every((k) => Number.isInteger(emptyDefaults[k]) && emptyDefaults[k] === DEFAULT_CADENCE[k]);
+    if (emptyOk) {
+      pass('followup-cadence emits cadenceDefaults even when the tracker is empty (#4005)');
+    } else {
+      fail(`an empty tracker withholds cadenceDefaults, so a first-run web cadence form renders blank (#4005): ${JSON.stringify(emptyEmitted)}`);
+    }
+    // The error must SURVIVE alongside the defaults: stats.mjs short-circuits on
+    // result.error before it reads entries, so dropping it while adding the
+    // defaults would hand that caller a payload with no entries to iterate.
+    if (emptyEmitted?.error === 'No applications found in tracker.') {
+      pass('the empty-tracker payload still reports its error alongside the defaults (#4005)');
+    } else {
+      fail(`the empty-tracker error was lost, so callers that branch on result.error now fall through (#4005): ${JSON.stringify(emptyEmitted)}`);
+    }
     const webFollowups = join(ROOT, 'web', 'src', 'lib', 'followups.ts');
     if (existsSync(webFollowups)) {
       const webSrc = readFileSync(webFollowups, 'utf-8');
@@ -15478,6 +16620,7 @@ try {
     // than skip, because a skip is how this freeze would silently stop guarding.
     const required = {
       'claude-invocation.mjs': join(webLib, 'claude-invocation.mjs'),
+      'worker-capabilities.mjs': join(webLib, 'worker-capabilities.mjs'),
       'cv-envelope.mjs': join(webLib, 'cv-envelope.mjs'),
       'run-prompts.mjs': join(webLib, 'run-prompts.mjs'),
       'api/run/route.ts': runRoutePath,
@@ -15487,9 +16630,14 @@ try {
       fail(`web/ exists but ${missing.join(', ')} is missing — the #2185 write-scope freeze cannot verify (was it moved?)`);
     } else {
       let invocation;
+      let capabilities;
       let prompts;
       try {
         invocation = await import(pathToFileURL(required['claude-invocation.mjs']).href);
+        // KNOWN_KINDS moved to worker-capabilities.mjs, which owns the policy both
+        // CLIs read: the set of run kinds is a fact about the route's workers, not
+        // about Claude (#2507).
+        capabilities = await import(pathToFileURL(required['worker-capabilities.mjs']).href);
         prompts = await import(pathToFileURL(required['run-prompts.mjs']).href);
         // Imported for its side effect of resolving: run-prompts pulls cv-envelope
         // for CV_ENVELOPE_INSTRUCTION, so a break there would surface here anyway,
@@ -15507,10 +16655,15 @@ try {
       // next, and this section previously covered 4 of the 6 files present.
       let webUnits = [];
       try {
-        webUnits = readdirSync(join(ROOT, 'web', 'tests', 'lib'))
+        const webLibRoot = join(ROOT, 'web', 'tests', 'lib');
+        webUnits = readdirSync(webLibRoot, { recursive: true })
           .filter((f) => f.endsWith('.test.mjs'))
+          // A checkout under web/tests/lib holds another tree's suites; the
+          // parity walk below skips those the same way (#3762), so the gate
+          // must not run them.
+          .filter((f) => !isUnderNestedCheckout(webLibRoot, f))
           .sort()
-          .map((f) => `web/tests/lib/${f}`);
+          .map((f) => join('web', 'tests', 'lib', f));
       } catch (err) {
         // Fail rather than throw to the outer catch, which would skip every value
         // assertion below while reporting only "freeze section crashed".
@@ -15523,13 +16676,13 @@ try {
         if (existsSync(join(ROOT, 'web', 'tests', 'lib'))) {
           fail('web/tests/lib contains no *.test.mjs — the #2185 unit suites are not being gated');
         }
-      } else if (run(NODE, ['--test', ...webUnits], { timeout: 180000 }) !== null) {
+      } else if (run(NODE, ['--experimental-strip-types', '--test', ...webUnits], { timeout: 180000 }) !== null) {
         pass('web pdf write-scope unit suites pass (#2185)');
       } else {
         // The signal distinguishes a timeout/kill from an assertion failure —
         // run()'s default 30s is short for six suites in one child process.
         const killed = lastRunFailure()?.signal;
-        fail(`web pdf write-scope unit suites failed${killed ? ` (killed: ${killed})` : ''} (run: node --test ${webUnits.join(' ')})`);
+        fail(`web pdf write-scope unit suites failed${killed ? ` (killed: ${killed})` : ''} (run: node --experimental-strip-types --test ${webUnits.join(' ')})`);
       }
 
       // Parity: everything web/package.json would run must be something we DO run.
@@ -15547,7 +16700,9 @@ try {
         const webTestsRoot = join(ROOT, 'web', 'tests');
         const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
           const p = join(dir, e.name);
-          if (e.isDirectory()) return walk(p);
+          // A checkout under web/tests/ holds another tree's suites; reporting
+          // them as ungated web suites is a false failure (#3762).
+          if (e.isDirectory()) return isNestedCheckout(p) ? [] : walk(p);
           return e.isFile() && e.name.endsWith('.test.mjs') ? [p] : [];
         });
         if (existsSync(webTestsRoot)) {
@@ -15594,7 +16749,7 @@ try {
         // can still be auto-approved by --permission-mode acceptEdits, and a
         // pdf-only probe let exactly that ship for the persisting kinds.
         const unmentioned = [];
-        for (const kind of invocation.KNOWN_KINDS) {
+        for (const kind of capabilities.KNOWN_KINDS) {
           const scope = invocation.toolScopeFor(kind);
           const named = [...toolNames(scope.allowed), ...toolNames(scope.disallowed)];
           for (const tool of WRITE_CAPABLE_TOOLS) {
@@ -15672,8 +16827,35 @@ try {
           .split('\n')
           .filter((l) => !/^\s*import\b/.test(l))
           .join('\n');
-        const spelledFlags = ['--allowedTools', '--disallowedTools', '--permission-mode']
-          .filter((flag) => routeCode.includes(flag));
+        // The sandbox flags join the tool flags here (#2507). Permission is no
+        // longer Claude-only: Codex is fenced with `-c sandbox_mode=…` applied at
+        // the spawn boundary, and the same reasoning applies — a route that spells
+        // its own sandbox policy makes the value assertions above describe an argv
+        // that is not the one shipped. Comments are stripped before this runs, so
+        // the route's prose about sandboxes is exempt; only real strings count.
+        //
+        // Anchored patterns, not bare substrings: `read-only` and `workspace-write`
+        // as plain `includes()` would fire on any prose or identifier containing
+        // them, and a bare `-s` cannot be matched that way at all because
+        // `--strict-mcp-config` contains it. Each pattern below names the flag form
+        // it is actually looking for.
+        const SANDBOX_PATTERNS = [
+          [/--allowedTools/, '--allowedTools'],
+          [/--disallowedTools/, '--disallowedTools'],
+          [/--permission-mode/, '--permission-mode'],
+          [/--sandbox\b/, '--sandbox'],
+          [/\bsandbox_mode\s*=/, 'sandbox_mode='],
+          [/\bsandbox_workspace_write\./, 'sandbox_workspace_write.*'],
+          // Approval policy and web access are permission too, and are what a
+          // route reaching for its own Codex invocation spells first — #2361 did
+          // exactly that, inline, in another route.
+          [/--ask-for-approval/, '--ask-for-approval'],
+          [/--search\b/, '--search'],
+          // `-s` as a standalone argv token: quoted on its own, as an argv element
+          // would be. Does not match the `-s` inside `--strict-mcp-config`.
+          [/(['"`])-s\1/, '-s'],
+        ];
+        const spelledFlags = SANDBOX_PATTERNS.filter(([re]) => re.test(routeCode)).map(([, name]) => name);
         const argvCallSites = (routeCode.match(/claudeCliArgs\s*\(/g) ?? []).length;
         // `kind` must reach claudeCliArgs as a SHORTHAND property. Property order
         // and line wrapping are free, but `{ kind: <anything> }` is refused:
@@ -16577,6 +17759,23 @@ try {
   }
   rmSync(runsTmp, { recursive: true, force: true });
 
+  // Scan-run persistence, missing parent directory: filePath nested inside a
+  // directory that does not exist yet, proving appendScanRunSummary creates its
+  // own parent rather than relying on a folder some earlier step happened to make.
+  {
+    const nestedTmp = mkdtempSync(join(tmpdir(), 'scanruns-nested-'));
+    const nestedFile = join(nestedTmp, 'nested', 'deep', 'scan-runs.tsv');
+    appendScanRunSummary(counters, nestedFile);
+    const nestedRows = readFileSync(nestedFile, 'utf-8').trim().split('\n');
+    if (nestedRows[0] === SCAN_RUNS_HEADER.trim() && nestedRows.length === 2
+      && nestedRows[1].startsWith('2026-07-03T14:02:11Z\tcompleted\t45\t3\t120\t')) {
+      pass('appendScanRunSummary creates a missing nested parent directory and writes header + row');
+    } else {
+      fail(`appendScanRunSummary with missing nested parent: wrong file contents: ${JSON.stringify(nestedRows)}`);
+    }
+    rmSync(nestedTmp, { recursive: true, force: true });
+  }
+
   // computeRunStats: header-name parsing, torn rows skipped, failed runs
   // excluded from averages.
   const stats = await import(pathToFileURL(join(ROOT, 'stats.mjs')).href);
@@ -16697,6 +17896,25 @@ try {
     pass('computePortalStats counts auth/server streaks as persistently dead; recovery resets');
   } else {
     fail(`computePortalStats auth/server streaks wrong: ${JSON.stringify(p2?.persistentlyDead)}`);
+  }
+
+  // A streak from an entry that is no longer probed (moved to
+  // scan_method: websearch, provider dropped, renamed) must not stand as a
+  // permanent 🚨 — nothing it can write will ever clear it. Staleness is
+  // relative to the newest row in the file, not the wall clock.
+  const portalsYml3 = 'tracked_companies:\n  - name: MovedToWebsearch\n  - name: StillFailing\njob_boards: []';
+  const staleHealthTsv = 'timestamp\tcompany\tstatus\n' +
+    '2026-07-01\tMovedToWebsearch\tslug_gone\n' +
+    '2026-07-02\tMovedToWebsearch\tslug_gone\n' +
+    '2026-07-03\tMovedToWebsearch\tslug_gone\n' +
+    '2026-08-10\tStillFailing\tslug_gone\n' +
+    '2026-08-11\tStillFailing\tslug_gone\n' +
+    '2026-08-12\tStillFailing\tslug_gone\n';
+  const p3 = stats.computePortalStats(portalsYml3, null, [], staleHealthTsv);
+  if (p3 && p3.persistentlyDead === 1) {
+    pass('computePortalStats ignores failure streaks from entries no longer probed');
+  } else {
+    fail(`computePortalStats stale-streak gate wrong: ${JSON.stringify(p3?.persistentlyDead)}`);
   }
 
   // scan.mjs computeConsecutiveFailures — same inverted rule at the source:
@@ -17747,12 +18965,36 @@ try {
     const descriptions = [
       ['entity', entity.description || ''],
       ...projects.map((pr) => [`project ${pr.guid}`, pr.description || '']),
+      // Plans are read by funders too: a six-month plan quoting "72,400+ stars"
+      // with no date went stale the same way an entity description would.
+      ...plans.map((pl) => [`plan ${pl.guid}`, pl.description || '']),
     ];
     const undated = descriptions.filter(([, text]) => METRIC_RE.test(text) && !COUNTED_RE.test(text));
     if (undated.length === 0) {
       pass('every funding.json description that quotes a count also states when it was counted');
     } else {
       fail(`funding.json ${undated.map(([w]) => w).join(', ')}: quotes a metric with no "counted <date>"`);
+    }
+
+    // A repository wellKnown is the proof the directory asks for: it fetches that
+    // file and looks for the manifest URL in it. The repo moved to the org on
+    // 31-Aug and the listing kept flagging it as unproven until this file existed,
+    // so the check is that the file ships AND names the manifest's own URL.
+    const repoProofs = projects.filter((pr) => pr.repositoryUrl?.wellKnown);
+    if (repoProofs.length > 0) {
+      const WELL_KNOWN = '.well-known/funding-manifest-urls';
+      const MANIFEST_URL = 'https://github.com/career-ops-hq/career-ops/raw/main/funding.json';
+      let proof = null;
+      try { proof = readFile(WELL_KNOWN); } catch { proof = null; }
+      const listed = proof ? proof.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [];
+      const pointsHere = repoProofs.every((pr) => pr.repositoryUrl.wellKnown.endsWith(`/${WELL_KNOWN}`));
+      if (proof !== null && listed.includes(MANIFEST_URL) && pointsHere) {
+        pass(`${WELL_KNOWN} ships and lists ${MANIFEST_URL}, and repositoryUrl.wellKnown points at it`);
+      } else {
+        fail(proof === null ? `repositoryUrl.wellKnown is set but ${WELL_KNOWN} is missing`
+          : !pointsHere ? `repositoryUrl.wellKnown does not point at ${WELL_KNOWN}`
+          : `${WELL_KNOWN} does not list ${MANIFEST_URL}`);
+      }
     }
   }
 } catch (e) {
@@ -17833,6 +19075,73 @@ try {
   if (geminiTmp && existsSync(geminiTmp)) {
     rmSync(geminiTmp, { recursive: true, force: true });
   }
+}
+
+console.log('\n74. gmail: isCleanUrl() drops page assets');
+try {
+  const { isCleanUrl } = await import(pathToFileURL(join(ROOT, 'plugins', 'gmail', '_helpers.mjs')).href);
+
+  // The bug: job-alert emails embed a company logo per job. These reached the
+  // pipeline as untitled "job leads" because they are https, carry no tracker
+  // keyword, and sit on the board's own domain.
+  const assets = [
+    'https://80000hours.org/wp-content/uploads/2023/11/acme-160x160.jpeg',
+    'https://example.com/logo.svg?v=2',              // cache-buster after the extension
+    'https://example.com/hero.PNG',                  // extension case is not significant
+    'https://cdn.example.com/anything',              // asset subdomain, no extension
+    'https://images.example.com/x',
+    'https://fonts.googleapis.com/css2?family=Inter', // webfont CSS has no extension
+    'https://example.com/wp-includes/js/x',
+  ];
+  const bad = assets.filter(isCleanUrl);
+  if (bad.length === 0) pass('isCleanUrl() rejects logos, webfonts and asset hosts');
+  else fail(`isCleanUrl() let ${bad.length} asset URL(s) through: ${bad.join(', ')}`);
+
+  // Regression guard: real postings must survive. "gh_src=js" and "/static-site/"
+  // are the shapes most likely to trip a naive asset filter.
+  const postings = [
+    'https://boards.greenhouse.io/acme/jobs/4384681009?gh_src=js',
+    'https://jobs.ashbyhq.com/acme/abc-123',
+    'https://jobs.lever.co/acme/b71cd010-d3cf-446c-80fa',
+    'https://careers.example.com/static-site-engineer',
+    'https://example.com/jobs/senior-media-buyer',
+  ];
+  const lost = postings.filter(u => !isCleanUrl(u));
+  if (lost.length === 0) pass('isCleanUrl() still accepts real job postings');
+  else fail(`isCleanUrl() wrongly rejected: ${lost.join(', ')}`);
+
+  // Pre-existing behaviour must not regress.
+  if (!isCleanUrl('http://example.com/jobs/1') && !isCleanUrl('https://example.com/click/track')
+      && !isCleanUrl('not a url')) {
+    pass('isCleanUrl() keeps rejecting http, trackers and malformed input');
+  } else {
+    fail('isCleanUrl() regressed on http / tracker / malformed input');
+  }
+} catch (e) {
+  fail(`gmail isCleanUrl tests crashed: ${e.message}`);
+}
+
+// JD-archive validator wiring + read-only boundary (#2789) moved to
+// tests/jd-archive-wiring.test.mjs (#3935) — discovered automatically below.
+
+console.log('\n76. README sponsors section is generated from .github/sponsors.json');
+try {
+  // The Sponsors section of README.md (heading, intro, per-sponsor rows,
+  // independence note, placement between the community section and the value
+  // proposition) and the per-sponsor rows of every README.<lang>.md are
+  // rendered by .github/scripts/sponsors.mjs; a hand edit on either side is
+  // drift that the next --write would silently undo, so the two are pinned
+  // together here. The script also refuses a logo that is not a file inside
+  // docs/sponsors/ (no hotlinking), a non-https sponsor URL, and a sponsor URL
+  // carrying tracking parameters.
+  const r = spawnSync(process.execPath, [join(ROOT, '.github', 'scripts', 'sponsors.mjs'), '--check'], { cwd: ROOT, encoding: 'utf8' });
+  if (r.status === 0) {
+    pass('README.md and every README.<lang>.md match .github/sponsors.json');
+  } else {
+    fail(`README sponsors drifted or invalid: ${String(r.stderr || r.stdout).trim().split('\n')[0]}`);
+  }
+} catch (e) {
+  fail(`sponsors check: ${e.message}`);
 }
 
 await runDiscovered();

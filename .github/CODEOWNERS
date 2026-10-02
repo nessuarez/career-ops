@@ -1,5 +1,5 @@
 # CODEOWNERS — auto-requests maintainer review on sensitive paths.
-# Last matching pattern wins. See MAINTAINERS.md for the team + ladder.
+# Last matching pattern wins. See MAINTAINERS.md for the team and GOVERNANCE.md for the ladder.
 #
 # Scope principle: gate what CI can't catch (a bad change here passes the
 # tests silently) + the catastrophic updater + governance docs. Code that
@@ -18,9 +18,16 @@
 # Repo docs & governance
 /README*.md            @santifer
 /CONTRIBUTING.md       @santifer
+/GOVERNANCE.md         @santifer
 /MAINTAINERS.md        @santifer
 /ARCHITECTURE.md       @santifer
 /.github/CODEOWNERS    @santifer
+
+# Coding-agent configuration (instructions, agent profiles, setup job):
+# a change here rewrites what an autonomous session is allowed to do.
+/.github/copilot-instructions.md  @santifer
+/.github/agents/                  @santifer
+/.github/instructions/            @santifer
 
 # Agent behavior & the multi-CLI contract (prompt layer — CI-blind)
 /CLAUDE.md             @santifer
@@ -63,3 +70,9 @@
 # check runs through, so it keeps the wider review.
 /tests/     @Scott-Emberson
 /dashboard/ @Scott-Emberson
+# Scanner providers and their contract suites are one reviewable unit: the
+# module and its test land together, and the review that matters on a fetch
+# surface (host allowlisting, redirects, SSRF, parsing pinned with concrete
+# assertions) is the one he has been doing on every provider PR (2-sep).
+/providers/       @Scott-Emberson
+/tests/providers/ @Scott-Emberson
