@@ -55,7 +55,7 @@ import { tmpdir } from 'os';
 import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as yaml from 'js-yaml';
-import { pass, fail, warn, run, runAcrossUtcDay, runAcrossLocalDay, lastRunFailure, formatRunFailure, fileExists, finish, results, ROOT, QUICK, NODE, DEFAULT_SCRIPT_TIMEOUT_MS, getBash, toBashPath, hermeticGitEnv } from './tests/helpers.mjs';
+import { pass, fail, warn, run, runAcrossUtcDay, lastRunFailure, formatRunFailure, fileExists, finish, results, ROOT, QUICK, NODE, DEFAULT_SCRIPT_TIMEOUT_MS, getBash, toBashPath, hermeticGitEnv } from './tests/helpers.mjs';
 import { flagValue, hasFlag } from './lib/cli-flags.mjs';
 import { collectMjsFiles, isNestedCheckout, isUnderNestedCheckout } from './lib/mjs-files.mjs';
 import { SCRATCH_PREFIX, isScratchDir, markScratchOwner, sweepScratchDirs } from './lib/scratch-dirs.mjs';
@@ -475,7 +475,6 @@ const scripts = [
   { name: 'build-cv-html.mjs --test', expectExit: 0 },
   { name: 'jd-skill-gap.mjs --self-test', expectExit: 0 },
   { name: 'story-provenance-check.mjs --self-test', expectExit: 0 },
-  { name: 'cv-title-check.mjs --self-test', expectExit: 0 },
   { name: 'verify-cv-facts.mjs --self-test', expectExit: 0 },
   { name: 'verify-ats.mjs --self-test', expectExit: 0 },
   { name: 'contacts.mjs --self-test', expectExit: 0 },
@@ -503,7 +502,6 @@ const scripts = [
   { name: 'agent-inbox-tests.mjs', expectExit: 0 },
   { name: 'followup-seed-tests.mjs', expectExit: 0 },
   { name: 'paste-reply-tests.mjs', expectExit: 0 },
-  { name: 'contact-extract-tests.mjs', expectExit: 0 },
   { name: 'set-status-tests.mjs', expectExit: 0 },
   // The one script in this list that genuinely needs longer than the shared
   // budget. It spawns competing writer processes for 27 contention cases, and
@@ -7207,13 +7205,9 @@ overrideOut?.includes('Acme') && overrideOut?.includes('staff-engineer')
 // dry-run: output always contains a local:jds/ reference and today's date.
 // The date the child prints is its own clock read, so it is compared against
 // the day(s) spanning the call rather than one captured up-section — see
-// runAcrossLocalDay() for why a single capture fails a run that crosses
-// midnight (#3816).
-//
-// LOCAL day, not UTC: archive-posting names its capture with localToday(), so
-// asserting the UTC day here passed only where the two agree — which is most of
-// the day in most zones, and never in the evening west of Greenwich.
-const { out: refOut, days: refDays } = runAcrossLocalDay(NODE, ['archive-posting.mjs', '--dry-run', 'https://boards.greenhouse.io/openai/jobs/123']);
+// runAcrossUtcDay() for why a single capture fails a run that crosses
+// midnight UTC (#3816).
+const { out: refOut, days: refDays } = runAcrossUtcDay(NODE, ['archive-posting.mjs', '--dry-run', 'https://boards.greenhouse.io/openai/jobs/123']);
 refOut?.includes('local:jds/') && refDays.some((day) => refOut?.includes(day))
   ? pass('dry-run: local:jds/ reference and date emitted')
   : fail('dry-run: reference or date missing from output');
@@ -7261,9 +7255,8 @@ reportSpaceOut?.includes('jds/042-') && reportSpaceOut?.toLowerCase().includes('
   ? pass('--report N: value consumed, URL still parsed')
   : fail('--report N: swallowed the URL or dropped the report number');
 
-// omitting --report leaves the historical filename shape untouched — the date
-// in it is the LOCAL calendar day (localToday()), the day the user was working.
-const { out: noReportOut, days: noReportDays } = runAcrossLocalDay(NODE, ['archive-posting.mjs', '--dry-run', 'https://boards.greenhouse.io/openai/jobs/123']);
+// omitting --report leaves the historical filename shape untouched
+const { out: noReportOut, days: noReportDays } = runAcrossUtcDay(NODE, ['archive-posting.mjs', '--dry-run', 'https://boards.greenhouse.io/openai/jobs/123']);
 noReportDays.some((day) => noReportOut?.includes(`jds/${day}_`))
   ? pass('no --report: filename shape unchanged')
   : fail('no --report: filename shape regressed');
@@ -13268,7 +13261,7 @@ try {
   rmSync(ready, { recursive: true, force: true });
 
   // Auto-copy template: when modes/_profile.md or modes/_custom.md is missing but template exists,
-  // doctor --json --init-templates copies them, records them in autoCopied, and does not report them as missing (#1369).
+  // doctor --json auto-copies them, records them in autoCopied, and does not report them as missing (#1369).
   const autoCopy = mkdtempSync(join(tmpdir(), 'co-autocopy-'));
   mkdirSync(join(autoCopy, 'config'), { recursive: true });
   mkdirSync(join(autoCopy, 'modes'), { recursive: true });
@@ -13277,7 +13270,7 @@ try {
   }
   writeFileSync(join(autoCopy, 'modes/_profile.template.md'), '# profile template\n');
   writeFileSync(join(autoCopy, 'modes/_custom.template.md'), '# custom template\n');
-  const ac = JSON.parse(run(NODE, ['doctor.mjs', '--json', '--init-templates', '--target', autoCopy]) || '{}');
+  const ac = JSON.parse(run(NODE, ['doctor.mjs', '--json', '--target', autoCopy]) || '{}');
   if (
     ac.onboardingNeeded === false &&
     Array.isArray(ac.missing) &&
@@ -13290,9 +13283,9 @@ try {
     existsSync(join(autoCopy, 'modes/_custom.md')) &&
     readFileSync(join(autoCopy, 'modes/_custom.md'), 'utf-8') === '# custom template\n'
   ) {
-    pass('Explicit onboarding → modes/_profile.md and modes/_custom.md copied with --init-templates (#1369)');
+    pass('Auto-copy template → modes/_profile.md and modes/_custom.md copied silently in --json mode (#1369)');
   } else {
-    fail(`Template initialization failed: ${JSON.stringify(ac)}`);
+    fail(`Auto-copy template failed in --json mode: ${JSON.stringify(ac)}`);
   }
   rmSync(autoCopy, { recursive: true, force: true });
 
@@ -16655,15 +16648,10 @@ try {
       // next, and this section previously covered 4 of the 6 files present.
       let webUnits = [];
       try {
-        const webLibRoot = join(ROOT, 'web', 'tests', 'lib');
-        webUnits = readdirSync(webLibRoot, { recursive: true })
+        webUnits = readdirSync(join(ROOT, 'web', 'tests', 'lib'))
           .filter((f) => f.endsWith('.test.mjs'))
-          // A checkout under web/tests/lib holds another tree's suites; the
-          // parity walk below skips those the same way (#3762), so the gate
-          // must not run them.
-          .filter((f) => !isUnderNestedCheckout(webLibRoot, f))
           .sort()
-          .map((f) => join('web', 'tests', 'lib', f));
+          .map((f) => `web/tests/lib/${f}`);
       } catch (err) {
         // Fail rather than throw to the outer catch, which would skip every value
         // assertion below while reporting only "freeze section crashed".

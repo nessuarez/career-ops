@@ -86,7 +86,6 @@ func TestComputeStatsMetrics(t *testing.T) {
 		{
 			Archetype: "Technical AI PM",
 			Score:     4.5,
-			HasScore:  true,
 			WorkMode:  "Remote",
 			Location:  "Berlin",
 			PayMax:    180000,
@@ -96,7 +95,6 @@ func TestComputeStatsMetrics(t *testing.T) {
 		{
 			Archetype: "Senior AI Product Manager",
 			Score:     4.0,
-			HasScore:  true,
 			WorkMode:  "Remote",
 			Location:  "Berlin",
 			PayMax:    200000,
@@ -106,7 +104,6 @@ func TestComputeStatsMetrics(t *testing.T) {
 		{
 			Archetype: "Solutions Architect AI",
 			Score:     3.2,
-			HasScore:  true,
 			WorkMode:  "Hybrid",
 			Location:  "Munich",
 			PayMax:    120000,
@@ -116,7 +113,6 @@ func TestComputeStatsMetrics(t *testing.T) {
 		{
 			Archetype: "Research Scientist",
 			Score:     2.1,
-			HasScore:  true,
 			WorkMode:  "Onsite",
 			Location:  "Munich",
 			PayMax:    90000,

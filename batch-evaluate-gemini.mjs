@@ -18,7 +18,7 @@ import { fileURLToPath } from 'url';
 import { chromium } from 'playwright';
 import { execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
-import { rejectPrivateOrInvalid, checkUrlLiveness, LIVENESS_CONTEXT_OPTIONS } from './liveness-browser.mjs';
+import { rejectPrivateOrInvalid } from './liveness-browser.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { TSV_ADDITION_HEADER } from './tracker-parse.mjs';
@@ -238,16 +238,7 @@ async function evaluateWithRetry(jdText, retries = 5) {
   }
 }
 
-async function verifyPostingLiveness(browser, url) {
-  const page = await browser.newPage(LIVENESS_CONTEXT_OPTIONS);
-  try {
-    return await checkUrlLiveness(page, url);
-  } finally {
-    await page.close();
-  }
-}
-
-export async function processOffer(browser, line, idx, _evaluate = evaluateWithRetry, _checkLiveness = verifyPostingLiveness) {
+export async function processOffer(browser, line, idx, _evaluate = evaluateWithRetry) {
   const match = line.match(/- \[\s*\]\s+(https?:\/\/\S+)(?:\s*\|\s*([^|]+)\s*\|\s*(.+))?/);
   if (!match) return { line, processed: false };
 
@@ -259,38 +250,16 @@ export async function processOffer(browser, line, idx, _evaluate = evaluateWithR
   console.log(`🔄 Processing [${idx}]: ${companyHint} - ${titleHint}`);
   console.log(`🔗 URL: ${url}`);
 
-  async function resolveDeadPosting() {
-    // Neither model output nor a failed scrape proves closure. Verify the URL
-    // independently; active/uncertain results preserve pending work.
-    const liveness = await _checkLiveness(browser, url);
-    if (liveness?.result !== 'expired' || liveness?.code === 'insufficient_content') {
-      return { line, processed: false, outcome: 'unconfirmed-dead-posting' };
-    }
-    const label = match[2] ? `${companyHint} | ${titleHint}` : url;
-    const newLine = `- [x] ~~${label}~~ — oferta nieaktywna`;
-    console.log(`⏭️ Closed posting: ${companyHint} - ${titleHint}`);
-    return { line: newLine, processed: true, outcome: 'dead-posting' };
-  }
-
   try {
-    let jdText;
-    try {
-      jdText = await scrapeUrl(browser, url);
-    } catch {
-      return await resolveDeadPosting();
-    }
+    const jdText = await scrapeUrl(browser, url);
     if (!jdText || jdText.length < 100) {
-      return await resolveDeadPosting();
+      throw new Error('Extracted text too short (likely blocked or empty)');
     }
 
     console.log(`🧠 Calling Gemini (${modelName})...`);
     const evaluationText = await _evaluate(`URL: ${url}\n\n${jdText}`);
 
     // Parse output
-    if (/^---DEAD_POSTING---\s*$/m.test(evaluationText)) {
-      return await resolveDeadPosting();
-    }
-
     const summaryMatch = evaluationText.match(/---SCORE_SUMMARY---\s*([\s\S]*?)---END_SUMMARY---/);
     if (!summaryMatch) {
       console.error('Missing SCORE_SUMMARY block from model output:\n' + evaluationText.slice(0, 500));
