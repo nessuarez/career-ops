@@ -336,6 +336,15 @@ console.log(`🤖  Calling ${modelName} via ${endpointHost}... this may take a m
 
 const headers = { 'Content-Type': 'application/json' };
 if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+// OpenCode Go gateway (https://opencode.ai/zen/go/v1) hard-requires a stable
+// session header for routing (HTTP 400 MissingSessionID without it, verified
+// 2026-10-08) and asks clients to identify with their own user agent:
+// https://opencode.ai/v2/docs/console/go/#where-can-i-use-it
+// Host-gated: nothing changes for OpenRouter/OpenAI/local endpoints.
+if (endpointHost === 'opencode.ai') {
+  headers['x-opencode-session'] = 'career-ops-eval';
+  headers['User-Agent'] = 'career-ops-eval/1.0';
+}
 
 let evaluationText;
 try {
