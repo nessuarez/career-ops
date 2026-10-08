@@ -273,3 +273,5 @@ follow-ups.md
 !documents/.gitkeep
 !documents/README.md
 data/agent-inbox.md
+# Local Pi runtime state
+.atl/
