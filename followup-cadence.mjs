@@ -48,7 +48,7 @@ const appliedDaysRaw = flagValue(args, '--applied-days');
 // effect can be asserted directly, rather than only "the CLI didn't error".
 const APPLIED_DAYS_RE = /^\d+$/;
 export function parseAppliedDaysOverride(raw) {
-  return raw !== undefined && APPLIED_DAYS_RE.test(raw) ? parseInt(raw, 10) : null;
+  return raw !== undefined && APPLIED_DAYS_RE.test(raw) ? positiveInteger(raw) : null;
 }
 const appliedDaysOverride = parseAppliedDaysOverride(appliedDaysRaw);
 
@@ -72,8 +72,12 @@ const PROFILE_CADENCE_KEYS = {
 };
 
 function positiveInteger(value) {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  if (typeof value === 'string') {
+    value = value.trim();
+    if (!/^\+?\d+$/.test(value)) return null;
+    value = Number(value);
+  }
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 export function loadProfileCadence(profilePath = PROFILE_FILE) {
@@ -91,6 +95,18 @@ export function loadProfileCadence(profilePath = PROFILE_FILE) {
     if (parsed !== null) cadence[cadenceKey] = parsed;
   }
   return cadence;
+}
+
+// follow_ups.enabled: false in the profile turns the follow-up features off.
+// Anything else, including a missing or unreadable profile, keeps them on, so
+// an install that never set the key behaves exactly as before.
+export function loadFollowupsEnabled(profilePath = PROFILE_FILE) {
+  if (!profilePath || !existsSync(profilePath)) return true;
+  try {
+    return yaml.load(readFileSync(profilePath, 'utf-8'))?.follow_ups?.enabled !== false;
+  } catch {
+    return true;
+  }
 }
 
 export function resolveCadenceConfig({ profilePath = PROFILE_FILE, appliedDays = appliedDaysOverride } = {}) {
@@ -141,7 +157,7 @@ function statusAliasMap() {
   return (aliasMapCache = map);
 }
 
-const ACTIONABLE_STATUSES = ['applied', 'responded', 'interview'];
+const ACTIONABLE_STATUSES = ['applied', 'responded', 'assessment', 'interview'];
 
 export function normalizeStatus(raw) {
   // foldStatusInput, not a bare toLowerCase: JS lowercases the Turkish dotted
@@ -186,6 +202,32 @@ export function parseDate(dateStr) {
 // silently fell back to the evaluation date — the exact wrong-age failure this
 // lookup exists to prevent. The leading \b still refuses "reapplied".
 //
+// A bounded gap between "applied" and the date covers the channel phrasing
+// career-ops' own apply modes write -- "Applied via Ashby 2026-08-31",
+// "Applied on 2026-08-25 via Ashby" -- which the original adjacent-only match
+// missed entirely, silently degrading to the evaluation-date fallback on the
+// exact notes this project generates (#4084). Bounded to 40 chars total and
+// unable to cross a sentence boundary (`.`/`;`/`?`/`!`) or a line break so it
+// cannot reach into a neighbouring sentence or a different requisition's
+// date; isCrossReferencedMention below reuses the same source so its "does
+// the citation already have a date" check stays in sync with what this one
+// actually matches.
+//
+// The {0,39} quantifier, not {0,40}: the mandatory separator right after it
+// is part of the gap too, so the true maximum distance between "applied" and
+// the date is quantifier-plus-one. Two CodeRabbit rounds on #4143:
+//   - `?`/`!` join `.`/`;` as sentence boundaries the gap cannot cross --
+//     "Applied? 2026-08-31" no longer reaches a foreign date.
+//   - The mandatory separator is [^\S\r\n\u2028\u2029] (whitespace that is
+//     not itself a line terminator), not \s: \s matches \r/\n/U+2028/U+2029
+//     the same as a space, so "Applied via Ashby\n2026-08-31" would have
+//     matched even with the gap itself excluding line terminators -- the
+//     separator character is the one place a line break could still sneak
+//     through.
+const APPLIED_DATE_SOURCE = String.raw`\bapplied\b[^.;?!\r\n\u2028\u2029]{0,39}?[^\S\r\n\u2028\u2029]~?(\d{4}-\d{2}-\d{2})(?![\w-])`;
+const APPLIED_DATE_RE = new RegExp(APPLIED_DATE_SOURCE, 'gi');
+const APPLIED_DATE_HAS_DATE_RE = new RegExp(APPLIED_DATE_SOURCE, 'i');
+
 // The trailing (?![\w-]) is the mirror of that leading \b: without it a
 // malformed value ("2026-06-091", "2026-06-09-2026-06-10") is truncated to a
 // plausible-looking date and then reported as a *measured* apply date. That is
@@ -216,7 +258,7 @@ export function parseAppliedDate(notes, options = {}) {
   const text = String(notes);
 
   const matches = [];
-  for (const m of text.matchAll(/\bapplied\s+~?(\d{4}-\d{2}-\d{2})(?![\w-])/gi)) {
+  for (const m of text.matchAll(APPLIED_DATE_RE)) {
     if (!validateCalendar || isRealCalendarDate(m[1])) matches.push({ date: m[1], index: m.index });
   }
   if (matches.length === 0) return null;
@@ -257,9 +299,9 @@ const CROSS_REF_LOOKBACK = 120;
 // identifier for THIS row, not a pointer at another tracker row. Anchored at the
 // end so it only matches a label sitting directly before the `#`, and the
 // separator excludes `.!?` so a sentence boundary cannot be swallowed into it.
-// Same vocabulary as merge-tracker.mjs's REQ_NUMBER_RE, which reads the same
+// Same vocabulary as tracker-parse.mjs's REQ_NUMBER_RE (used by merge-tracker.mjs), which reads the same
 // Notes column.
-const REQ_LABELLED_HASH_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?)[\s:_-]*$/i;
+const REQ_LABELLED_HASH_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?|r_)[\s:_-]*$/i;
 
 /**
  * Whether the apply-date at `index` is being cited ABOUT ANOTHER ROW.
@@ -302,14 +344,22 @@ const REQ_LABELLED_HASH_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|
  * @returns {boolean}
  */
 function isCrossReferencedMention(text, index) {
-  const window = text.slice(Math.max(0, index - CROSS_REF_LOOKBACK), index);
+  const windowStart = Math.max(0, index - CROSS_REF_LOOKBACK);
+  const window = text.slice(windowStart, index);
   let refEnd = -1;
-  for (const m of window.matchAll(/#\d+\b/g)) {
+  // A `#NNN` glued to a preceding word character or hyphen is an external tag
+  // ("job-search#7", "gh#12"), not a pointer at a tracker row. Reading it as a
+  // row reference discarded the row's own date: "job-search#7; Applied
+  // 2026-09-21" attributed the date to row #7.
+  for (const m of window.matchAll(/(?<![\w-])#\d+\b/g)) {
+    // The lookbehind cannot see past the slice, so a tag whose `#` lands exactly
+    // on the window's first character is checked against the original text.
+    if (m.index === 0 && /[\w-]/.test(text[windowStart - 1] ?? '')) continue;
     // A `#NNN` tagged as a req/job/posting/reference id is not a row reference:
     // "Req #1311 - applied 2026-08-06" is this row's own posting id followed by
     // this row's own date, and reading it as a cross-reference would discard a
     // genuine date. The label vocabulary is the one merge-tracker.mjs already
-    // recognises in this same Notes column (REQ_NUMBER_RE), kept in sync by
+    // recognises in this same Notes column (tracker-parse.mjs REQ_NUMBER_RE), kept in sync by
     // being written the same way rather than imported — merge-tracker's regex
     // also captures the id itself, which is not wanted here.
     if (REQ_LABELLED_HASH_RE.test(window.slice(0, m.index))) continue;
@@ -350,7 +400,7 @@ function isCrossReferencedMention(text, index) {
   const lastSeparator = [...sinceRef.matchAll(/[;|]/g)].pop();
   if (lastSeparator) {
     const beforeSeparator = sinceRef.slice(0, lastSeparator.index);
-    if (/\bapplied\s+~?\d{4}-\d{2}-\d{2}/i.test(beforeSeparator)) return false;
+    if (APPLIED_DATE_HAS_DATE_RE.test(beforeSeparator)) return false;
   }
   return true;
 }
@@ -406,10 +456,11 @@ export function addDays(date, days) {
 // below is what the CLI path uses.
 function parseTrackerContent(content) {
   const lines = String(content ?? '').split('\n');
-  const colmap = resolveColumns(lines);
+  const parseOptions = { allowTabs: true, allowIndentation: true };
+  const colmap = resolveColumns(lines, parseOptions);
   const entries = [];
   for (const line of lines) {
-    const row = parseTrackerRow(line, colmap);
+    const row = parseTrackerRow(line, colmap, parseOptions);
     if (row) entries.push(row);
   }
   return entries;
@@ -734,10 +785,11 @@ export function resolveReportPath(reportField, appsFile = APPS_FILE, repoRoot = 
 }
 
 // --- Compute urgency ---
-// For responded/interview, logged follow-ups CLEAR the overdue state and the
+// For responded/assessment/interview, logged follow-ups CLEAR the overdue state and the
 // clock restarts from the last touch (re-overdue every responded_subsequent
 // days) — matching the cadence table in modes/followup.md ("Responded: every
-// 3 days · Interview: thank-you, then every 3 days, no limit").
+// 3 days · Assessment uses the responded cadence · Interview: thank-you, then
+// every 3 days, no limit").
 export function computeUrgency(status, daysSinceApp, daysSinceLastFollowup, followupCount) {
   if (status === 'applied') {
     if (followupCount >= CADENCE.applied_max_followups) return 'cold';
@@ -745,7 +797,7 @@ export function computeUrgency(status, daysSinceApp, daysSinceLastFollowup, foll
     if (followupCount > 0 && daysSinceLastFollowup !== null && daysSinceLastFollowup >= CADENCE.applied_subsequent) return 'overdue';
     return 'waiting';
   }
-  if (status === 'responded') {
+  if (status === 'responded' || status === 'assessment') {
     if (daysSinceLastFollowup !== null) {
       return daysSinceLastFollowup >= CADENCE.responded_subsequent ? 'overdue' : 'waiting';
     }
@@ -770,7 +822,7 @@ export function computeNextFollowupDate(status, appDate, lastFollowupDate, follo
     if (lastFollowupDate) return addDays(parseDate(lastFollowupDate), CADENCE.applied_subsequent);
     return addDays(parseDate(appDate), CADENCE.applied_first);
   }
-  if (status === 'responded') {
+  if (status === 'responded' || status === 'assessment') {
     if (lastFollowupDate) return addDays(parseDate(lastFollowupDate), CADENCE.responded_subsequent);
     return addDays(parseDate(appDate), CADENCE.responded_initial);
   }
@@ -792,10 +844,37 @@ export function computeNextFollowupDate(status, appDate, lastFollowupDate, follo
 // requires followupCount >= applied_max_followups) simply never triggers —
 // no error, no guessing, matching the same "absent optional file = pass
 // through" convention used elsewhere in this project.
-export function analyzeFromContent(trackerContent, followupsContent = '') {
+export function analyzeFromContent(trackerContent, followupsContent = '', { enabled = true } = {}) {
+  if (!enabled) {
+    return {
+      followupsEnabled: false,
+      metadata: { analysisDate: today().toISOString().split('T')[0], totalTracked: 0, actionable: 0, overdue: 0, urgent: 0, cold: 0, waiting: 0, retired: 0 },
+      entries: [],
+      cadenceConfig: CADENCE,
+      cadenceDefaults: DEFAULT_CADENCE,
+    };
+  }
   const apps = parseTrackerContent(trackerContent);
   if (apps.length === 0) {
-    return { error: 'No applications found in tracker.' };
+    // cadenceDefaults rides along on the error. It is a constant, so it is just
+    // as valid with no applications as with a hundred, and this is the ONE
+    // state where a consumer cannot do without it: on a first run the web
+    // cadence form has no profile overrides to fall back on either, so
+    // withholding it renders six empty fields with nothing to type back in.
+    // The rest of the normal shape rides along too, zeroed, so a reader that
+    // skips `error` (the web follow-ups page) renders an empty tracker instead
+    // of "cadence unavailable".
+    return {
+      error: 'No applications found in tracker.',
+      noData: true,
+      metadata: {
+        analysisDate: today().toISOString().split('T')[0],
+        totalTracked: 0, actionable: 0, overdue: 0, urgent: 0, cold: 0, waiting: 0, retired: 0,
+      },
+      entries: [],
+      cadenceConfig: CADENCE,
+      cadenceDefaults: DEFAULT_CADENCE,
+    };
   }
 
   const followups = parseFollowups(followupsContent);
@@ -932,13 +1011,18 @@ export function analyzeFromContent(trackerContent, followupsContent = '') {
 
 // --- Main analysis (disk-backed CLI entry point) ---
 function analyze() {
+  if (!loadFollowupsEnabled()) return analyzeFromContent('', '', { enabled: false });
   const trackerContent = existsSync(APPS_FILE) ? readFileSync(APPS_FILE, 'utf-8') : '';
   const followupsContent = existsSync(FOLLOWUPS_FILE) ? readFileSync(FOLLOWUPS_FILE, 'utf-8') : '';
-  return analyzeFromContent(trackerContent, followupsContent);
+  return analyzeFromContent(trackerContent, followupsContent, { enabled: loadFollowupsEnabled() });
 }
 
 // --- Summary mode ---
 function printSummary(result) {
+  if (result.followupsEnabled === false) {
+    console.log('\nFollow-ups are turned off (follow_ups.enabled: false in config/profile.yml).\n');
+    return;
+  }
   if (result.error) {
     console.log(`\n${result.error}\n`);
     return;
@@ -986,12 +1070,20 @@ function printSummary(result) {
 
 // ── CLI flags + help ────────────────────────────────────────────────
 
-const KNOWN_FLAGS = ['--summary', '--overdue-only', '--applied-days', '--help', '-h'];
+// --json is the DEFAULT output form, not a mode switch: it names what the
+// script already does with no flag at all. It is listed here because callers
+// pass it explicitly — web/src/app/api/followups/route.ts and
+// web/src/app/api/followups/cadence/route.ts both spawn `[script, '--json']`
+// — and validateFlags() rejects any flag not on this list, so omitting it
+// made both routes exit 1 and read as "no follow-ups" (#3196 added the
+// validation without the flag the web already passed).
+const KNOWN_FLAGS = ['--summary', '--json', '--overdue-only', '--applied-days', '--help', '-h'];
 const VALUE_FLAGS = ['--applied-days'];
 
 const USAGE = `Usage:
   node followup-cadence.mjs                    # full JSON analysis to stdout
-  node followup-cadence.mjs --summary          # human-readable dashboard
+  node followup-cadence.mjs --json             # same as above, JSON is the default
+  node followup-cadence.mjs --summary          # human-readable dashboard (wins over --json)
   node followup-cadence.mjs --overdue-only     # only show overdue/urgent entries
   node followup-cadence.mjs --applied-days 10  # override applied_first cadence (days)
   node followup-cadence.mjs --help|-h          # print this usage block and exit`;
@@ -1016,11 +1108,16 @@ if (isMainModule(import.meta.url)) {
 
   const result = analyze();
 
+  // --summary wins when both are given: it is the flag that asks for something
+  // other than the default, so it is the one carrying an intention.
   if (summaryMode) {
     printSummary(result);
   } else {
     console.log(JSON.stringify(result, null, 2));
   }
 
-  if (result.error) process.exit(1);
+  // An empty tracker is a new user, not a failure. analyze-patterns.mjs and the
+  // other tracker readers exit 0 here too; exiting 1 made the web dashboard read
+  // a first run as "cadence unavailable".
+  if (result.error && !result.noData) process.exit(1);
 }

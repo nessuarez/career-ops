@@ -29,10 +29,23 @@
 import { readFileSync, existsSync } from 'fs';
 import { canonicalize, extractSkills } from './skill-extract.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { join } from 'path';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { normalizePandocLine, toPlainText } from './lib/cv-markdown.mjs';
 
 // ── Config ──────────────────────────────────────────────────────────
 
-const CV_PATH = 'cv.md';
+// From the data root, not the cwd. cv.md is a Source-of-Truth Boundary primary
+// file and lives wherever CAREER_OPS_ROOT / CAREER_OPS_DATA_DIR / the
+// .career-ops-data marker points; a bare relative path resolves against
+// whatever directory the process was started in.
+//
+// Everything this script reports is a comparison against that file, so without
+// it there is nothing to say at all. The error below therefore has to serve two
+// different users at once: one who never wrote a cv.md, and one who has one
+// sitting outside the data root this resolver just looked in. Naming only one
+// of them sends the other to the wrong fix.
+const CV_PATH = join(getCareerOpsRoot(), 'cv.md');
 
 // ── JD skill extraction (regex, no LLM) ─────────────────────────────
 //
@@ -41,16 +54,40 @@ const CV_PATH = 'cv.md';
 // (missing a skill) is recoverable by the user reading the JD themselves;
 // over-extracting noise into "required skills" is not — it would misreport
 // gaps that aren't real.
-
+//
 // Real postings rarely use the word "Requirements". The literal-only list
 // missed the phrasings most modern ATS boards actually ship ("What we're
 // looking for", "Who you are", "You may be a good fit if", "You have"), so a
 // JD could yield zero skills - which reads identically to "no gaps found" and
 // is the more dangerous of the two failure modes this file warns about.
+//
+// CJK characters are \W (non-word), so the s?\b suffix that works for ASCII
+// terms would always fail after a Chinese heading: \b asserts between \w and
+// \W, and after a CJK char the following whitespace / colon / newline is also
+// \W, so no boundary fires. The fix is a separate alternation arm for CJK
+// terms that drops s?\b; both arms share the same ^#{0,6}\s* prefix.
+//
+// The prefix itself stays #{0,6} — it is NOT widened to also swallow `*`/`_`.
+// A bolded heading with no markdown hash ("**What We're Looking For**") is
+// handled instead by stripping `**`/`__` pairs from the line before testing
+// it against this pattern (see stripBoldMarkers() and its call site in
+// scanJd(), #4273). Widening the prefix character class was the first thing
+// tried here and it regressed a real, common shape: an asterisk-BULLET whose
+// text happens to start with a keyword — "* Required: Python and
+// Kubernetes" — would have its leading `*` consumed as a heading marker,
+// misclassifying the bullet itself as a new heading (and dropping the
+// skills on that exact line, since a heading match short-circuits before
+// bullet extraction runs). Stripping only doubled `**`/`__` markers — never
+// a single `*`/`_` — leaves a literal bullet character untouched, since a
+// real bullet is one asterisk, not two.
 const REQUIREMENT_HEADER_RE = new RegExp(
-  '^#{0,6}\\s*(?:' + [
+  '^#{0,6}\\s*\u3010?\\s*(?:(?:' + [
     'required', 'requirements', 'qualifications', 'must[- ]have', 'preferred', 'nice[- ]to[- ]have',
-    "what\\s+we(?:'|’)?\\s*re\\s+looking\\s+for",
+    // (?:'|’)?\s*re|\s+are (not just (?:'|’)?\s*re): the contracted-only form
+    // matched "we're"/"we re" but not the equally common uncontracted "we are"
+    // (#4273 — the Netflix posting that surfaced this used the uncontracted,
+    // bolded form of this exact heading).
+    "what\\s+we(?:(?:'|’)?\\s*re|\\s+are)\\s+looking\\s+for",
     "what\\s+you(?:(?:'|’)ll|\\s+will)?\\s+bring",
     'who\\s+you\\s+are',
     'about\\s+you',
@@ -67,7 +104,31 @@ const REQUIREMENT_HEADER_RE = new RegExp(
     'it\\s+would\\s+be\\s+great\\s+if\\s+you\\s+ha(?:ve|d)',
     'ideal\\s+candidate',
     'skills\\s+(?:and|&)\\s+experience',
-  ].join('|') + ')s?\\b.*$',
+  ].join('|') + ')s?\\b|(?:' + [
+    // zh-TW / zh-CN requirement headers.
+    // 104 / 1111 / CakeResume / Yourator all use variants of these headings.
+    '\u61C9\u5FB5\u689D\u4EF6',   // 應徵條件
+    '\u8CC7\u683C\u689D\u4EF6',   // 資格條件
+    '\u8077\u52D9\u9700\u6C42',   // 職務需求
+    '\u689D\u4EF6\u8981\u6C42',   // 條件要求
+    '\u4EFB\u8077\u8CC7\u683C',   // 任職資格
+    '\u5FC5\u8981\u689D\u4EF6',   // 必要條件
+    '\u57FA\u672C\u8981\u6C42',   // 基本要求 (same code points in zh-TW and zh-CN)
+    '\u8077\u4F4D\u8981\u6C42',   // 職位要求
+    // zh-CN (Simplified). The entries above use Traditional code points
+    // (職 U+8077, 資 U+8CC7, 條 U+689D, 項 U+9805), so a Simplified posting
+    // (职 U+804C, 资 U+8D44, 条 U+6761, 项 U+9879) never matched them.
+    '\u804C\u4F4D\u8981\u6C42',   // 职位要求
+    '\u5C97\u4F4D\u8981\u6C42',   // 岗位要求
+    '\u5C97\u4F4D\u57FA\u672C\u8981\u6C42', // 岗位基本要求
+    '\u4EFB\u804C\u8981\u6C42',   // 任职要求
+    '\u4EFB\u804C\u8D44\u683C',   // 任职资格
+    '\u6761\u4EF6\u8981\u6C42',   // 条件要求
+    // preferred / nice-to-have
+    '\u52A0\u5206\u9805\u76EE',   // 加分項目
+    '\u52A0\u5206\u689D\u4EF6',   // 加分條件
+    '\u52A0\u5206\u9879',         // 加分项 (zh-CN)
+  ].join('|') + ')).*$',
   'im'
 );
 
@@ -75,8 +136,13 @@ const REQUIREMENT_HEADER_RE = new RegExp(
 // heading levels. Without this the block stayed open to end-of-file and swept
 // the benefits list into "required skills" - turning perks like "401k",
 // "Equity" and "Carrot" into reported skill gaps.
+//
+// Same #{0,6} prefix, same reason for leaving it unwidened, as
+// REQUIREMENT_HEADER_RE above: a bolded "**Benefits**" with no markdown hash
+// is handled by stripBoldMarkers() before this pattern ever sees the line,
+// not by letting the prefix itself swallow `*`/`_` (#4273).
 const NON_REQUIREMENT_HEADER_RE = new RegExp(
-  '^#{0,6}\\s*(?:' + [
+  '^#{0,6}\\s*\u3010?\\s*(?:(?:' + [
     // Responsibilities. The negative lookahead keeps "You will have" on the
     // requirements side — this list is tested BEFORE REQUIREMENT_HEADER_RE in
     // scanJd(), so without it a "You will have:" heading would close a block
@@ -92,13 +158,49 @@ const NON_REQUIREMENT_HEADER_RE = new RegExp(
     'equal\\s+opportunity', 'eeo', 'diversity',
     'interview\\s+process', 'how\\s+to\\s+apply', 'to\\s+apply',
     'our\\s+(?:stack|process|values|mission)',
-  ].join('|') + ')\\b.*$',
+  ].join('|') + ')\\b|(?:' + [
+    // zh-TW / zh-CN closing headers — drops \b for the same CJK reason.
+    '\u5DE5\u4F5C\u5167\u5BB9',   // 工作內容
+    '\u5DE5\u4F5C\u8077\u8CAC',   // 工作職責
+    '\u8077\u8CAC\u7BC4\u758A',   // 職責範疇
+    '\u798F\u5229',               // 福利
+    '\u85AA\u8CC7',               // 薪資
+    '\u85AA\u916C',               // 薪酬 (zh-CN)
+    '\u516C\u53F8\u4ECB\u7D39',   // 公司介紹
+    '\u95DC\u65BC\u6211\u5011',   // 關於我們
+    '\u61C9\u5FB5\u65B9\u5F0F',   // 應徵方式
+    '\u5982\u4F55\u61C9\u5FB5',   // 如何應徵
+    // zh-CN (Simplified) closing headers.
+    '\u5DE5\u4F5C\u5185\u5BB9',   // 工作内容
+    '\u5DE5\u4F5C\u804C\u8D23',   // 工作职责
+    '\u5C97\u4F4D\u804C\u8D23',   // 岗位职责
+    '\u804C\u4F4D\u63CF\u8FF0',   // 职位描述
+    '\u85AA\u8D44',               // 薪资
+    '\u516C\u53F8\u4ECB\u7ECD',   // 公司介绍
+    '\u5173\u4E8E\u6211\u4EEC',   // 关于我们
+  ].join('|') + ')).*$',
   'im'
 );
 
 // `\r?$` is required, not cosmetic: JS treats \r as a line terminator, so `.`
 // cannot consume it and a bare `$` never matches on a CRLF-split line.
 const BULLET_LINE_RE = /^\s*[-*•]\s*(.+)\r?$/;
+
+// Strip markdown STRONG-emphasis markers (`**text**` / `__text__`) so a
+// bolded heading with no `#` at all — "**What We're Looking For**" — still
+// reaches REQUIREMENT_HEADER_RE / NON_REQUIREMENT_HEADER_RE's own `#{0,6}`
+// prefix as if the bold wrapper were never there (#4273).
+//
+// Only doubled markers: a single `*`/`_` is left completely alone, on
+// purpose. `*` is also how a plain markdown bullet starts (BULLET_LINE_RE),
+// and a bullet whose text happens to start with a keyword — "* Required:
+// Python and Kubernetes" — must stay a bullet, not become a misdetected
+// heading that swallows its own line's skills before bullet extraction ever
+// runs. `**` (two characters) can never be a single-asterisk bullet marker,
+// so this global-replace has no bullet-collision case to worry about.
+function stripBoldMarkers(line) {
+  return line.replace(/\*\*|__/g, '');
+}
 
 // A conservative skill-token extractor: pulls comma/slash/and-separated
 // technical-looking tokens out of a requirement bullet, rather than treating
@@ -160,36 +262,50 @@ function scanJd(jdText) {
   let sawRequirementSection = false;
 
   for (const line of lines) {
+    // Header-classification only, never bullet extraction below: a bolded
+    // heading ("**Benefits**") must match these two regexes as if the bold
+    // wrapper weren't there, but a bolded SKILL inside a bullet
+    // ("- **Docker** and **Kubernetes**") already extracts fine as-is via
+    // SKILL_TOKEN_RE, which skips right over `*` since it isn't in the
+    // token's character class — stripping there would be a no-op at best
+    // (#4273).
+    const headerLine = stripBoldMarkers(line);
     // Checked before the requirement test so a heading that satisfies both
     // (e.g. "Why this role") closes the block rather than reopening it.
-    if (NON_REQUIREMENT_HEADER_RE.test(line)) {
+    if (NON_REQUIREMENT_HEADER_RE.test(headerLine)) {
       inRequirementsBlock = false;
       continue;
     }
-    if (REQUIREMENT_HEADER_RE.test(line)) {
+    if (REQUIREMENT_HEADER_RE.test(headerLine)) {
       inRequirementsBlock = true;
       sawRequirementSection = true;
+      // "Requirements: SQL; dbt; Tableau" puts the whole list on the header
+      // line, with no bullets under it. A separator is required so a sentence
+      // such as "About you: Curious and kind" is not read as a list.
+      const inline = headerLine.includes(':') ? headerLine.slice(headerLine.indexOf(':') + 1) : '';
+      if (/[;,]/.test(inline)) addSkillTokens(inline, skills);
       continue;
     }
     if (inRequirementsBlock && line.trim() === '') continue;
-    if (inRequirementsBlock && /^#{1,6}\s/.test(line) && !REQUIREMENT_HEADER_RE.test(line)) {
+    if (inRequirementsBlock && /^#{1,6}\s/.test(line) && !REQUIREMENT_HEADER_RE.test(headerLine)) {
       inRequirementsBlock = false;
     }
 
     const bulletMatch = BULLET_LINE_RE.exec(line);
-    if (inRequirementsBlock && bulletMatch) {
-      const bulletText = bulletMatch[1];
-      let m;
-      SKILL_TOKEN_RE.lastIndex = 0;
-      while ((m = SKILL_TOKEN_RE.exec(bulletText)) !== null) {
-        const token = m[1].trim();
-        if (!STOPWORDS.has(token.toLowerCase()) && token.length > 1) {
-          skills.add(token);
-        }
-      }
-    }
+    if (inRequirementsBlock && bulletMatch) addSkillTokens(bulletMatch[1], skills);
   }
   return { skills: [...skills], sawRequirementSection };
+}
+
+function addSkillTokens(text, skills) {
+  let m;
+  SKILL_TOKEN_RE.lastIndex = 0;
+  while ((m = SKILL_TOKEN_RE.exec(text)) !== null) {
+    const token = m[1].trim();
+    if (!STOPWORDS.has(token.toLowerCase()) && token.length > 1) {
+      skills.add(token);
+    }
+  }
 }
 
 /**
@@ -278,39 +394,50 @@ function skillMentionedInText(skill, text) {
 // section at all or matches a literal "Z" character later in the text.
 // Scanning line-by-line for the next heading avoids the anchor entirely.
 
-const SKILLS_HEADING_RE = /^#{1,6}\s*Skills\s*$/i;
 const ANY_HEADING_RE = /^#{1,6}\s/;
 
+// Which headings open a named skills section (#4879). The heading is read
+// through lib/cv-markdown.mjs first, so `## **[Skills]{.smallcaps}**` counts.
+// "Skills" anywhere in the heading counts at any level ("Technical Skills",
+// "Skills & Tools"). "Tools" / "Technologies" / "Tech Stack" only count on a
+// level-1 or level-2 heading: at level 3 they would also match an employer
+// such as "### Acme Technologies — Remote" and promote that job's prose into
+// named skills.
+const SKILLS_WORD_RE = /\bskills\b/i;
+const TOOLS_WORD_RE = /\b(?:tools|technologies|tech\s+stack)\b/i;
+
+function isSkillsHeading(line) {
+  // `\s*` rather than `\s+` keeps the historical `#Skills` (no space) form.
+  const m = String(line).match(/^(#{1,6})(?!#)\s*(.+?)\s*$/);
+  if (!m) return false;
+  const text = toPlainText(normalizePandocLine(m[2]).replace(/\s*\{[^}]*\}\s*$/, ''));
+  return SKILLS_WORD_RE.test(text) || (m[1].length <= 2 && TOOLS_WORD_RE.test(text));
+}
+
 /**
- * Split cv.md into its named "Skills" section (if any) and the remaining
- * prose, without relying on a Python-style end-of-string regex anchor.
+ * Split cv.md into its named skills sections (if any) and the remaining
+ * prose, without relying on a Python-style end-of-string regex anchor. Every
+ * skills heading contributes its section, up to the next heading of any
+ * level, so a CV with both "## Core Skills" and "## Technical Platforms &
+ * Tools" counts both.
  * @param {string} cvText
  * @returns {{namedSkillsText: string, proseText: string}}
  */
 function splitSkillsSection(cvText) {
-  const lines = cvText.split('\n');
-  let start = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (SKILLS_HEADING_RE.test(lines[i])) {
-      start = i + 1;
-      break;
+  const named = [];
+  const prose = [];
+  let inSkills = false;
+  for (const line of cvText.split('\n')) {
+    const skillsHeading = isSkillsHeading(line);
+    if (skillsHeading || ANY_HEADING_RE.test(line)) {
+      inSkills = skillsHeading;
+      // A skills heading itself belongs to neither side.
+      if (!skillsHeading) prose.push(line);
+      continue;
     }
+    (inSkills ? named : prose).push(line);
   }
-  if (start === -1) {
-    return { namedSkillsText: '', proseText: cvText };
-  }
-
-  let end = lines.length;
-  for (let i = start; i < lines.length; i++) {
-    if (ANY_HEADING_RE.test(lines[i])) {
-      end = i;
-      break;
-    }
-  }
-
-  const namedSkillsText = lines.slice(start, end).join('\n');
-  const proseText = lines.slice(0, start - 1).concat(lines.slice(end)).join('\n');
-  return { namedSkillsText, proseText };
+  return { namedSkillsText: named.join('\n'), proseText: prose.join('\n') };
 }
 
 // ── Classification ───────────────────────────────────────────────────
@@ -339,21 +466,25 @@ function classifySkillGaps(jdSkills, cvText) {
 
   for (const skill of jdSkills) {
     const canon = canonicalize(skill);
-    // "Known" = skill-extract recognizes this token (canonicalize rewrote it,
-    // or SKILL_PATTERN matches it). For known skills the canonical-set lookup
-    // is authoritative and alias-safe. Unknown/free tokens canonicalize to
-    // themselves and fall through to the word-boundary heuristic below, which
-    // is byte-for-byte the prior behavior — jd-skill-gap keeps its own
-    // heuristics for free tokens (#1896 answer 2).
-    const known = canon !== skill || extractSkills(skill).size > 0;
+    // "Known" = skill-extract reads this token as its own canonical skill. For
+    // known skills the canonical-set lookup is authoritative and alias-safe.
+    // Unknown/free tokens canonicalize to themselves and fall through to the
+    // word-boundary heuristic below, which is byte-for-byte the prior behavior
+    // — jd-skill-gap keeps its own heuristics for free tokens (#1896 answer 2).
+    // A known skill must not reach that heuristic: it matches the JD's spelling
+    // anywhere, including the prose skill-extract declines to count ("go the
+    // extra mile", "a safe environment", "Fine-tuning the funnel"). Containing
+    // a skill is not being one: "React.js" extracts as React, never as itself,
+    // so it stays a free token and the heuristic still finds it in a CV.
+    const known = extractSkills(skill).has(canon);
 
     if (known && namedCanon.has(canon)) {
       existing.push(skill);
     } else if (known && proseCanon.has(canon)) {
       supportedByResume.push(skill);
-    } else if (skillMentionedInText(skill, namedSkillsText)) {
+    } else if (!known && skillMentionedInText(skill, namedSkillsText)) {
       existing.push(skill);
-    } else if (skillMentionedInText(skill, proseText)) {
+    } else if (!known && skillMentionedInText(skill, proseText)) {
       supportedByResume.push(skill);
     } else {
       gap.push(skill);
@@ -450,6 +581,31 @@ Python, Docker, Zookeeper
   eq('an h5 Skills heading is recognized as the named section', deepCvResult.existing.includes('Python'), true);
   eq('the named section stops at the h6 heading (Kubernetes stays prose)', deepCvResult.existing.includes('Kubernetes'), false);
   eq('prose under the h6 still classifies as supportedByResume', deepCvResult.supportedByResume.includes('Kubernetes'), true);
+
+  // Pandoc-flavored and differently named skills headings (#4879). The
+  // issue's repro: skills under "## **[Technical Platforms & Tools]{.smallcaps}**"
+  // were reported as resume prose, so the existing bucket was always empty.
+  const pandocSkillsCv = [
+    '# Jane Example', '',
+    '## **[Technical Platforms & Tools]{.smallcaps}**', '',
+    '- Cloud: AWS, Kubernetes, Terraform', '',
+    '## **[Professional Experience]{.smallcaps}**', '',
+    '### **Acme Technologies** --- New York, NY', '',
+    'Migrated the PostgreSQL fleet.',
+  ].join('\n');
+  const pandocSkillsResult = classifySkillGaps(['AWS', 'Kubernetes', 'Terraform', 'PostgreSQL'], pandocSkillsCv);
+  eq('a bold + span "Technical Platforms & Tools" heading is a named skills section',
+    pandocSkillsResult.existing.sort(), ['AWS', 'Kubernetes', 'Terraform']);
+  eq('a level-3 employer named "... Technologies" is not a skills section',
+    pandocSkillsResult.supportedByResume, ['PostgreSQL']);
+  for (const heading of ['## Technical Skills', '## **[Skills]{.smallcaps}**', '### Core Skills', '## Technologies', '# Tech Stack', '## Skills {#skills}']) {
+    eq(`"${heading}" opens a named skills section`,
+      classifySkillGaps(['Python'], `${heading}\nPython\n`).existing, ['Python']);
+  }
+  const twoSectionsCv = '## Skills\nPython\n\n## Experience\nUsed Docker daily.\n\n## Tools\nTerraform\n';
+  const twoSectionsResult = classifySkillGaps(['Python', 'Terraform', 'Docker'], twoSectionsCv);
+  eq('every skills section counts, not just the first', twoSectionsResult.existing.sort(), ['Python', 'Terraform']);
+  eq('prose between two skills sections stays prose', twoSectionsResult.supportedByResume, ['Docker']);
 
   // Regression: requirement headings that are full sentences or bare
   // uppercase rather than the noun forms ("Requirements", "Qualifications").
@@ -667,6 +823,42 @@ Maintained the internal Fabrikam-SDK build.
   eq('unknown token present in CV still matches (word-boundary fallback preserved)', freeResult.existing.includes('Fabrikam-SDK'), true);
   eq('unknown token absent from CV is still a real gap', freeResult.gap.includes('Contoso-Cloud'), true);
 
+  // Regression: a known skill is decided by the canonical sets alone. Falling
+  // through to the word-boundary search matched the JD's spelling in prose that
+  // skill-extract declines to count, so a marketing CV "fine-tuning the funnel"
+  // read as support for an ML requirement, and Go and SAFe had the same hole.
+  const everydayCv = `
+# Skills
+HubSpot, Google Ads
+
+# Experience
+Fine-tuning the funnel to lift ROAS. Willing to go the extra mile; a safe pair of hands.
+`;
+  const everydayResult = classifySkillGaps(['Fine-tuning', 'Go', 'SAFe'], everydayCv);
+  eq('CV prose "Fine-tuning the funnel" leaves JD "Fine-tuning" a gap', everydayResult.gap.includes('Fine-tuning'), true);
+  eq('CV prose "go the extra mile" leaves JD "Go" a gap', everydayResult.gap.includes('Go'), true);
+  eq('CV prose "a safe pair of hands" leaves JD "SAFe" a gap', everydayResult.gap.includes('SAFe'), true);
+
+  const mlCv = `
+# Skills
+PyTorch, Fine-tuning, RAG
+
+# Experience
+Shipped a support assistant on Llama 3.
+`;
+  eq('a Skills entry "Fine-tuning" still satisfies JD "Fine-tuning"', classifySkillGaps(['Fine-tuning'], mlCv).existing, ['Fine-tuning']);
+
+  // The edge of "known": a token that only contains a skill is not that skill.
+  // "React.js" extracts as React, so the canonical sets never hold "React.js";
+  // counting it as known left a CV that lists it with a false gap.
+  const reactJdSkills = extractJdSkills('## Requirements\n- React.js and TypeScript\n');
+  eq('the JD tokenizer yields "React.js" as one token', reactJdSkills, ['React.js', 'TypeScript']);
+  eq(
+    'JD "React.js" is satisfied by a Skills entry "React.js"',
+    classifySkillGaps(reactJdSkills, '# Skills\nReact.js, TypeScript\n').existing,
+    ['React.js', 'TypeScript']
+  );
+
   // Regression (#2278): a JD the extractor cannot read returns zero skills, and
   // the three buckets then print exactly like "checked, no gaps found".
   // modes/pdf.md Step 4 uses this output as a gate, so the two cases have to be
@@ -753,13 +945,28 @@ Maintained the internal Fabrikam-SDK build.
     'empty-jd'
   );
 
-  // The warning must carry a caller-facing message, not just a code — the agent
-  // following modes/pdf.md Step 4 surfaces this text to the user.
-  eq(
-    'the diagnosis carries a non-empty message',
-    diagnoseExtraction(unreadableJd, []).message.length > 0,
-    true
-  );
+  // Regression (#3601): Chinese headers (zh-TW / zh-CN) like 應徵條件 or 職務需求
+  // must be recognized as requirement section openers, and headers like 工作內容
+  // or 福利 must close the section.
+  const zhJd = `
+# PHP 後端工程師
+
+## 應徵條件
+- 熟悉 PHP、MySQL、Git
+- 具 Linux 基本指令能力
+
+## 工作內容
+- 開發 RESTful API
+- 維護既有 專案
+`;
+  const zhSkills = extractJdSkills(zhJd);
+  eq('Chinese requirement header (應徵條件) extracts skills', zhSkills.includes('PHP'), true);
+  eq('Chinese requirement header extracts MySQL', zhSkills.includes('MySQL'), true);
+  eq('Chinese requirement header extracts Git', zhSkills.includes('Git'), true);
+  eq('Chinese requirement header extracts Linux', zhSkills.includes('Linux'), true);
+  eq('Chinese non-requirement header (工作內容) closes requirement section', zhSkills.includes('RESTful'), false);
+
+  eq('Chinese header diagnosis is conclusive', diagnoseExtraction(zhJd, zhSkills), null);
 
   console.log(`\njd-skill-gap self-test: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
@@ -767,7 +974,23 @@ Maintained the internal Fabrikam-SDK build.
 
 // ── Main ─────────────────────────────────────────────────────────────
 
+// Derived from the flags this file actually accepts, so `--help` cannot
+// describe an option that does not exist.
+const USAGE = `Usage:
+  node jd-skill-gap.mjs <jd-file> [--summary] [--self-test]
+
+  --summary    human-readable output instead of JSON
+  --self-test  run the built-in checks
+  --help, -h   print this and exit`;
+
 if (isMainModule(import.meta.url)) {
+  // BEFORE any work. Unhandled, `--help` fell through to the analysis: this
+  // script printed a full report for it, which is not what the flag asks for
+  // and hides that it was never recognised.
+  if (process.argv.slice(2).some((a) => a === '--help' || a === '-h')) {
+    console.log(USAGE);
+    process.exit(0);
+  }
 if (selfTestMode) {
   runSelfTest();
 } else {
@@ -777,7 +1000,8 @@ if (selfTestMode) {
     process.exit(1);
   }
   if (!existsSync(CV_PATH)) {
-    console.error(`Error: ${CV_PATH} not found — this is a user-layer file, create it first.`);
+    console.error(`Error: cv.md not found at ${CV_PATH}`);
+    console.error('Create it there, or point CAREER_OPS_ROOT / CAREER_OPS_DATA_DIR (or a .career-ops-data marker) at the directory that already has it.');
     process.exit(1);
   }
 
@@ -798,6 +1022,14 @@ if (selfTestMode) {
     console.log(`  ✅ Already in Skills section:   ${result.existing.join(', ') || '(none)'}`);
     console.log(`  📝 Mentioned in resume prose:   ${result.supportedByResume.join(', ') || '(none)'}`);
     console.log(`  ⚠️  Real gaps (not found anywhere): ${result.gap.join(', ') || '(none)'}`);
+    // Without a recognized skills heading every match lands in "prose", which
+    // reads like a CV that lists no skills rather than a heading this script
+    // did not recognize (#4879).
+    if (!splitSkillsSection(cvText).namedSkillsText.trim()) {
+      console.log('');
+      console.log('  ℹ️  No skills section recognized in cv.md (a heading containing "Skills", or a top-level');
+      console.log('     "Tools" / "Technologies" / "Tech Stack" heading), so nothing can be "already in Skills section".');
+    }
 
     // An empty three-bucket summary is indistinguishable from a clean bill of
     // health, and modes/pdf.md Step 4 treats this output as a gate. Say out loud

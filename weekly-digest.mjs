@@ -42,15 +42,18 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import * as yaml from 'js-yaml';
 
-// Only validateFlags: this module keeps its own flagValue (see below), so
-// importing the shared one too would shadow it.
-import { validateFlags } from './lib/cli-flags.mjs';
+import { validateFlags, flagValue } from './lib/cli-flags.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 
-const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_SESSIONS_DIR = join(CAREER_OPS, 'interview-prep', 'sessions');
-const DEFAULT_QUESTION_BANK_PATH = join(CAREER_OPS, 'interview-prep', 'question-bank.md');
+// The USER's data root. interview-prep/ is USER_PATHS in update-system.mjs, so
+// resolving it from this file's directory meant that with a data root configured
+// the digest looked in the checkout, found nothing, and said "no session files
+// fall inside this range" — blaming the dates for a directory it never opened.
+const DATA_ROOT = getCareerOpsRoot();
+const DEFAULT_SESSIONS_DIR = join(DATA_ROOT, 'interview-prep', 'sessions');
+const DEFAULT_QUESTION_BANK_PATH = join(DATA_ROOT, 'interview-prep', 'question-bank.md');
 
 const ROUND_ENUM = ['screen', 'hiring-manager', 'technical', 'system-design', 'behavioral', 'onsite', 'final'];
 
@@ -88,29 +91,6 @@ export function computeDefaultRange(now = new Date()) {
 
 function inRange(dateStr, from, to) {
   return isValidDateStr(dateStr) && dateStr >= from && dateStr <= to;
-}
-
-/**
- * Value of a value-taking flag, accepting BOTH `--flag value` and `--flag=value`.
- *
- * `args.indexOf('--from')` is -1 for the `=` form, so a space-separated-only
- * lookup silently DISCARDS the bound the caller supplied and the digest then
- * reports a different week than the one that was asked for — the same silent
- * discard `computeWeeklyDigest` already refuses to perform for a half-supplied
- * range. company-history.mjs carries this same note and the same fix.
- *
- * @param {string[]} args - argv slice.
- * @param {string} flag - Flag name including leading dashes, e.g. '--from'.
- * @returns {string|undefined} The value, or undefined when the flag is absent.
- */
-export function flagValue(args, flag) {
-  // `--flag=value` first: indexOf() can't see it, so checking it second would
-  // let the space-separated lookup fall through and drop the value.
-  const eq = args.find((a) => a.startsWith(`${flag}=`));
-  if (eq) return eq.slice(flag.length + 1);
-  const idx = args.indexOf(flag);
-  if (idx === -1) return undefined;
-  return args[idx + 1];
 }
 
 // ── Session file parsing ────────────────────────────────────────────

@@ -24,12 +24,17 @@ import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import * as yaml from 'js-yaml';
 import { outputLanguageInstruction, parseOutputLanguage } from './profile-language.mjs';
+import { TSV_ADDITION_HEADER } from './tracker-parse.mjs';
+import { normalizedTrackerScore } from './lib/tracker-addition.mjs';
 import {
   formatReportNumber, releaseReportNumbers, reserveReportNumbers,
 } from './reserve-report-num.mjs';
 import { TokenAccumulator, formatBreakdown, normalizeOpenAIUsage } from './utils/token-tracker.mjs';
 import { DEFAULT_USER_AGENT } from './user-agent.mjs';
 import { buildTitleFilter } from './title-keywords.mjs';
+import { appendToPipeline, appendToScanHistory } from './scan.mjs';
+import { localToday } from './lib/local-today.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -39,8 +44,14 @@ let activeModel = null;
 // ---------------------------------------------------------------------------
 // .env loader
 // ---------------------------------------------------------------------------
-const envPath = path.join(__dirname, '.env');
-if (fs.existsSync(envPath)) {
+// Lazy: only runs when this file is the CLI entry point (`node
+// openrouter-runner.mjs ...`). Importing the module (e.g. for buildSystemPrompt
+// in test-all.mjs) must NOT mutate process.env — a module-level loader here
+// leaked every .env key (including CAREER_OPS_CLI) into the importing process
+// and broke later CLI-resolution tests.
+function loadEnvFile() {
+  const envPath = path.join(__dirname, '.env');
+  if (!fs.existsSync(envPath)) return;
   for (const line of fs.readFileSync(envPath, 'utf-8').split('\n')) {
     const m = line.trim().match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
     if (m && process.env[m[1]] === undefined) {
@@ -77,8 +88,11 @@ const PROVIDER_PRIORITY = [
 let freeModels = null;   // string[]
 let modelIndex = 0;      // current position in rotation
 
-// Persistent blacklist file — survives process restarts
-const BLACKLIST_FILE = path.join(__dirname, 'data', 'model-blacklist.json');
+// Persistent blacklist file — survives process restarts. data/ is User Layer
+// (gitignored runtime state), so it follows the data root like every other
+// data/ path this runner touches.
+const BLACKLIST_DIR  = path.join(getCareerOpsRoot(), 'data');
+const BLACKLIST_FILE = path.join(BLACKLIST_DIR, 'model-blacklist.json');
 function loadPersistedBlacklist() {
   try {
     const data = JSON.parse(fs.readFileSync(BLACKLIST_FILE, 'utf-8'));
@@ -87,7 +101,7 @@ function loadPersistedBlacklist() {
 }
 function saveBlacklist(set) {
   try {
-    fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+    fs.mkdirSync(BLACKLIST_DIR, { recursive: true });
     fs.writeFileSync(BLACKLIST_FILE, JSON.stringify([...set], null, 2), 'utf-8');
   } catch {}
 }
@@ -98,6 +112,7 @@ if (blacklistedModels.size > 0) {
   console.log(`[blacklist] Loaded ${blacklistedModels.size} pre-blacklisted model(s) from disk.`);
 }
 // 429 failure count per model — auto-blacklist after 3 consecutive 429s
+// (a success or any other failure resets the count)
 const rateLimitCounts = {};
 
 // ---------------------------------------------------------------------------
@@ -160,19 +175,42 @@ async function cmdModels() {
 // ---------------------------------------------------------------------------
 // File helpers
 // ---------------------------------------------------------------------------
+// Anchored to the career-ops data root, not to __dirname. scan.mjs resolves
+// every path it touches through getCareerOpsRoot(), so with CAREER_OPS_DATA_DIR
+// set this module was reading a DIFFERENT data/scan-history.tsv than the shared
+// writers it now delegates to — dedup would clear a URL the writer then found
+// present, or skip one it had never seen. The default is unchanged: with no
+// env and no .career-ops-data marker, getCareerOpsRoot() returns the same
+// directory __dirname did.
+const DATA_ROOT = getCareerOpsRoot();
+// System-layer files ship with the code and never follow the data root: a data
+// root outside the checkout holds cv.md and modes/_profile.md, but no
+// modes/_shared.md or modes/oferta.md. Read through readFile() those came back
+// null, fell through to '', and the evaluation ran on a system prompt with no
+// shared rules and no evaluation mode (#5115). Same split as ollama-eval.mjs
+// and gemini-eval.mjs.
+const CODE_ROOT = __dirname;
+
 function readFile(relPath) {
-  try { return fs.readFileSync(path.join(__dirname, relPath), 'utf-8'); }
+  try { return fs.readFileSync(path.join(DATA_ROOT, relPath), 'utf-8'); }
+  catch { return null; }
+}
+
+function readSystemFile(relPath) {
+  try { return fs.readFileSync(path.join(CODE_ROOT, relPath), 'utf-8'); }
   catch { return null; }
 }
 
 function writeFile(relPath, content) {
-  const full = path.join(__dirname, relPath);
+  const full = path.join(DATA_ROOT, relPath);
   fs.mkdirSync(path.dirname(full), { recursive: true });
   fs.writeFileSync(full, content, 'utf-8');
 }
 
 function fileExists(relPath) {
-  return fs.existsSync(path.join(__dirname, relPath));
+  // Same root as readFile() above: a fileExists that disagrees with the reader
+  // is a split-brain waiting to happen under CAREER_OPS_DATA_DIR.
+  return fs.existsSync(path.join(DATA_ROOT, relPath));
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +351,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
       const usage = normalizeOpenAIUsage(data.usage);
 
       modelIndex = (modelIndex + attempt + 1) % active.length;
+      delete rateLimitCounts[model];
       console.log('OK');
       return { content, usage };
 
@@ -338,6 +377,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
           await new Promise(r => setTimeout(r, 800));
         }
       } else {
+        delete rateLimitCounts[model];
         console.log(`FAILED (${msg})`);
         await new Promise(r => setTimeout(r, 800));
       }
@@ -347,6 +387,10 @@ async function callOpenRouter(systemPrompt, userMessage) {
   throw new Error(`All ${active.length} active models failed. Last error: ${lastError?.message}`);
 }
 
+// Exported so tests/openrouter-runner-429-reset.test.mjs can script fetch()
+// against the real rotation and blacklist logic without a network or a CLI run.
+export { callOpenRouter, rateLimitCounts, blacklistedModels };
+
 // ---------------------------------------------------------------------------
 // Context loading
 // ---------------------------------------------------------------------------
@@ -354,7 +398,7 @@ function loadContext() {
   return {
     cv:          readFile('cv.md')               ?? 'CV not found.',
     profile:     readFile('config/profile.yml')  ?? '',
-    shared:      readFile('modes/_shared.md')    ?? '',
+    shared:      readSystemFile('modes/_shared.md') ?? '',
     profileMode: readFile('modes/_profile.md')   ?? '',
   };
 }
@@ -506,7 +550,24 @@ function markPipelineDone(url) {
   writeFile('data/pipeline.md', content);
 }
 
-function addToPipeline(entries) {
+// Both writes go through the shared writers in scan.mjs rather than this
+// module's own read-modify-write. Those writers hold pipeline-lock.mjs on the
+// file they touch, so this stops being a fourth, unlocked writer racing the
+// three appendToPipeline already names. The previous version read each file
+// whole, appended in memory, and wrote the whole thing back with a truncating
+// writeFileSync — so any row another scanner appended in between was erased,
+// silently, because every reader skips a malformed or missing row quietly.
+//
+// Delegating fixes three things at once that were all symptoms of hand-rolling
+// the write: the lock, the row format (formatScanHistoryRow emits every trailing
+// column; this module wrote seven and created a seven-column header), and the
+// date (the shared path stamps the local day, this one stamped the UTC day —
+// the defect #3240/#3241 fixed in the other scanners, which this module escaped
+// because that census finds scanners by looking for appendToScanHistory calls).
+//
+// It also picks up CAREER_OPS_DATA_DIR support for free: the shared paths are
+// DATA_ROOT-anchored, while the __dirname-relative paths here ignored it.
+async function addToPipeline(entries) {
   const history = readFile('data/scan-history.tsv') ?? 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\n';
   const seenUrls = new Set(history.split('\n').slice(1).map(l => l.split('\t')[0]).filter(Boolean));
 
@@ -529,17 +590,18 @@ function addToPipeline(entries) {
 
   if (newEntries.length === 0) return 0;
 
-  const today = new Date().toISOString().split('T')[0];
-  let pipeline = existingPipeline;
-  let hist = history;
+  // The shared writers take {url, company, title, location}; this module calls
+  // the title `role`.
+  const offers = newEntries.map(e => ({
+    url: e.url,
+    company: e.company,
+    title: e.role,
+    location: typeof e.location === 'string' ? e.location : '',
+    source: 'openrouter scan',
+  }));
 
-  for (const e of newEntries) {
-    pipeline += `- [ ] ${e.url} | ${e.company} | ${e.role}\n`;
-    hist     += `${e.url}\t${today}\tscan\t${e.role}\t${e.company}\tadded\t${e.location ?? ''}\n`;
-  }
-
-  writeFile('data/pipeline.md', pipeline);
-  writeFile('data/scan-history.tsv', hist);
+  await appendToPipeline(offers);
+  await appendToScanHistory(offers, localToday());
   return newEntries.length;
 }
 
@@ -598,7 +660,7 @@ async function cmdScan() {
     }
   }
 
-  const added = addToPipeline(found);
+  const added = await addToPipeline(found);
   console.log(`\n✅ Scan complete. ${found.length} matches, ${added} new entries added to pipeline.md.`);
   if (added > 0) {
     console.log('\n→  node openrouter-runner.mjs pipeline\n   to evaluate pending listings.\n');
@@ -609,7 +671,7 @@ async function cmdScan() {
 async function cmdEvaluate(input, ctx) {
   tracker.recordZeroToken('scan');
   tracker.recordZeroToken('pdf payload');
-  const modeContent = readFile('modes/oferta.md') ?? readFile('modes/auto-pipeline.md') ?? '';
+  const modeContent = readSystemFile('modes/oferta.md') ?? readSystemFile('modes/auto-pipeline.md') ?? '';
 
   let jdText = input;
 
@@ -655,8 +717,8 @@ async function cmdEvaluate(input, ctx) {
   let reservedNumbers;
   try {
     reservedNumbers = await reserveReportNumbers(1, {
-      rootDir: __dirname,
-      reportsDir: path.join(__dirname, 'reports'),
+      rootDir: DATA_ROOT,
+      reportsDir: path.join(DATA_ROOT, 'reports'),
     });
   } catch (e) {
     console.error(`Could not reserve a report number: ${e.message}`);
@@ -665,7 +727,7 @@ async function cmdEvaluate(input, ctx) {
 
   try {
     // Save report
-    const today   = new Date().toISOString().split('T')[0];
+    const today   = localToday();
     const num     = reservedNumbers[0];
     const slug    = extractCompanySlug(jdText, typeof input === 'string' ? input : null);
     const numStr  = formatReportNumber(num);
@@ -676,19 +738,38 @@ async function cmdEvaluate(input, ctx) {
     const legitLine  = legitMatch ? `**Legitimacy:** ${legitMatch[1].trim()}` : '**Legitimacy:** unconfirmed';
     writeFile(relPath, `**URL:** ${input || '(pasted)'}\n${legitLine}\n\n${result}`);
 
-    const scoreMatch  = result.match(/(?:score|puntuaci[oó]n)[^\d]*(\d+\.?\d*)/i);
-    const scoreValue  = scoreMatch ? parseFloat(scoreMatch[1]) : NaN;
-    const scoreStr    = isFinite(scoreValue) ? `${scoreValue.toFixed(1)}/5` : '';
+    // Capture the DENOMINATOR when the model writes one. The old pattern took
+    // only the numeric prefix, so `Score: 8/10` yielded `8` and the cell became
+    // `8.0/5` -- a ten-point score reinterpreted as a five-point one. That
+    // satisfies SCORE_CELL_RE, so it merged as a genuine score and fed
+    // stats.mjs's averages. normalizedTrackerScore refuses a denominator that
+    // is not 5, but only if it is handed one (#3796).
+    //
+    // The capture runs to END OF LINE rather than stopping at a denominator
+    // adjacent to the number. Requiring adjacency read `Score: 4.2 (strong
+    // fit)/10` -- a ten-point score with an annotation -- as a bare 4.2 and
+    // wrote `4.2/5`, the same wrong number the numeric prefix used to produce.
+    // The cost is that an unrelated fraction later in the line (`Score: 4.2 --
+    // matched 3/4 axes`) is refused as N/A rather than guessed at. That is the
+    // trade the shared helper already documents and the gemini path already
+    // pins: N/A is recoverable, a wrong score is not.
+    const scoreMatch  = result.match(/(?:score|puntuaci[oó]n)[^\d]*(\d+(?:\.\d+)?[^\r\n]*)/i);
+    // An unparseable score used to become the EMPTY string, and merge-tracker
+    // refuses a blank required cell ("use the documented sentinel rather than a
+    // blank cell") -- so the evaluation was skipped whole, the same loss #3796
+    // documents for the drifted copies. The shared helper returns the `N/A`
+    // sentinel (#1799), which merges as an unscored row instead of as nothing.
+    const scoreStr    = normalizedTrackerScore(scoreMatch ? scoreMatch[1] : '');
     const companyName = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     const reportLink  = `[${numStr}](reports/${numStr}-${slug}-${today}.md)`;
     const tsvLine     = `${num}\t${today}\t${companyName}\t(see report)\tEvaluated\t${scoreStr}\t❌\t${reportLink}\t\n`;
     const tsvFile     = `batch/tracker-additions/or-${numStr}-${slug}.tsv`;
-    // AGENTS.md: a tracker-addition TSV is a SINGLE data line of 9 tab-separated
-    // columns. merge-tracker.mjs reads the whole file as ONE record (no line
-    // splitting), so a leading header row makes parts[4]/parts[5] the literal
-    // "status"/"score" and the evaluation is skipped ("cannot tell score from
-    // status"). Write only the data line.
-    writeFile(tsvFile, tsvLine);
+    // Header row, then the single data row. merge-tracker.mjs resolves the
+    // fields by NAME when the header is present (#3517), so this row cannot be
+    // read into the wrong columns. (Headerless files still work; they are the
+    // legacy form, and they are the ones that can hit the undecidable
+    // score-vs-status case.)
+    writeFile(tsvFile, `${TSV_ADDITION_HEADER}\n${tsvLine}`);
 
     console.log(`\n✅ Report saved: ${relPath}`);
     console.log('\n─── EVALUATION ──────────────────────────────────────\n');
@@ -698,7 +779,7 @@ async function cmdEvaluate(input, ctx) {
     return relPath;
   } finally {
     try {
-      await releaseReportNumbers(reservedNumbers, { reportsDir: path.join(__dirname, 'reports') });
+      await releaseReportNumbers(reservedNumbers, { reportsDir: path.join(DATA_ROOT, 'reports') });
     } catch (e) {
       console.warn(`Could not release report reservation: ${e.message}`);
     }
@@ -737,14 +818,14 @@ async function cmdApply(ref, ctx) {
   tracker.recordZeroToken('scan');
   tracker.recordZeroToken('evaluation');
   tracker.recordZeroToken('pdf payload');
-  const modeContent = readFile('modes/apply.md') ?? '';
+  const modeContent = readSystemFile('modes/apply.md') ?? '';
 
   let reportContent;
   if (fileExists(ref)) {
     reportContent = readFile(ref);
   } else {
     const numStr = String(ref).padStart(3, '0');
-    const reportsDir = path.join(__dirname, 'reports');
+    const reportsDir = path.join(DATA_ROOT, 'reports');
     const dirEntries = fs.existsSync(reportsDir) ? fs.readdirSync(reportsDir) : [];
     const matches = dirEntries.filter(f => f.startsWith(numStr));
     if (matches.length === 0) {
@@ -801,6 +882,7 @@ async function cmdApply(ref, ctx) {
 // module can be imported (e.g. by test-all.mjs) without executing a command.
 const invokedDirectly = isMainModule(import.meta.url);
 const [,, command, ...args] = invokedDirectly ? process.argv : [];
+if (invokedDirectly) loadEnvFile();
 const ctx = invokedDirectly ? loadContext() : null;
 
 // Load free models list before running any AI command (skip when a model is pinned)

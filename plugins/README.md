@@ -77,6 +77,12 @@ node plugins.mjs run notion export [--dry-run]   # export
   hardcoded host, documented in its code).
 - `env` (frozen, scoped to your declared keys), `settings` (your non-secret
   `config/plugins.yml` block), `log` (redacts your declared secrets), `dryRun`.
+- `dataRoot` — the absolute path of the user's data root. If your plugin keeps a
+  file of its own (a cursor, a cache, a saved posting), build its path from
+  here: `join(ctx.dataRoot, 'data', 'my-plugin-state.json')`. A bare relative
+  path resolves against the working directory, which is not the data root when
+  the user keeps their data outside the checkout or runs the command from
+  another directory.
 
 ## Your own plugins → `plugins.local/`
 
@@ -104,9 +110,9 @@ directly. Containment is the same as everywhere else in open source:
 
 These don't belong in the plugin layer — they're a different direction:
 
-- **Centralized infrastructure** the project would operate — hosted job
-  aggregation, a shared matching service, proxies/Workers. That's a **separate,
-  opt-in service**, discussed in
+- **Centralized infrastructure** run by the project or by a licensed operator
+  on its behalf — hosted job aggregation, a shared matching service,
+  proxies/Workers. That's a **separate, opt-in service**, discussed in
   [Where career-ops is going (#904)](https://github.com/career-ops-hq/career-ops/discussions/904) —
   not the open-core.
 - **Auto-submitting / blind-applying** to jobs. career-ops is a decision-support
