@@ -15,8 +15,7 @@ import { readFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
-import { roleFuzzyMatch } from './role-matcher.mjs';
-import { normalizeUrl } from './url-key.mjs';
+import { postingUrlRelation } from './url-key.mjs';
 import {
   openTrackerTransaction, rebuildRow, normalizeCompany,
   loadCanonicalStates, resolveCanonicalStateId,
@@ -200,16 +199,32 @@ function normalizeRole(role) {
  * Check whether two tracker rows name two different postings.
  *
  * Only two present-and-different keys are evidence: a blank or placeholder URL
- * yields no key from normalizeUrl() and is UNKNOWN, never a conflict.
+ * yields no key from normalizeUrl() and is UNKNOWN, never a conflict. Two
+ * different known languages of one page are two postings (postingUrlRelation
+ * in url-key.mjs).
  *
  * @param {object} a - First parsed applications.md row.
  * @param {object} b - Second parsed applications.md row.
- * @returns {boolean} True when both rows carry a URL and the URLs differ.
+ * @returns {boolean} True when both rows carry a URL and the URLs name two postings.
  */
 function urlsConflict(a, b) {
-  const urlA = normalizeUrl(a.url);
-  const urlB = normalizeUrl(b.url);
-  return Boolean(urlA && urlB && urlA !== urlB);
+  return postingUrlRelation(a.url, b.url) === 'distinct';
+}
+
+/**
+ * Check whether two tracker rows show the same page with a language param on
+ * one side only (`…/job/1` vs `…/job/1?lang=en`).
+ *
+ * Not proof of two postings, so the same report identity still merges them,
+ * but not proof of one either: the bare row may be the German version and the
+ * other its English one, so a role match alone must not delete either.
+ *
+ * @param {object} a - First parsed applications.md row.
+ * @param {object} b - Second parsed applications.md row.
+ * @returns {boolean}
+ */
+function languageOnOneSide(a, b) {
+  return postingUrlRelation(a.url, b.url) === 'one-sided-language';
 }
 
 /**
@@ -248,9 +263,11 @@ function reqNumsConflict(a, b) {
  *
  * Two present-and-different posting URLs veto every tier, report identity
  * included (#4562). That is the rule merge-tracker.mjs applies (`urlDiffers`),
- * through the same normalizeUrl(): two rows cannot be one application while
+ * through the same postingUrlRelation(): two rows cannot be one application while
  * naming two postings. A blank or placeholder URL yields no key and is
  * UNKNOWN, never a conflict, so rows without URLs behave exactly as before.
+ * The same page with a language param on one URL only is not a conflict, so
+ * report identity still merges it, but it blocks the role-title match.
  * Two present-and-different requisition ids in Notes (`Job id 8157736` vs
  * `Job id 8157738`, the #1524 rule) veto every tier the same way, so one title
  * posted once per city or country keeps one row per posting.
@@ -266,6 +283,7 @@ function roleMatch(a, b) {
   if (reqNumsConflict(a, b)) return false;
 
   if (sameReportIdentity(a, b)) return true;
+  if (languageOnOneSide(a, b)) return false;
   if (normalizeRole(a.role) !== normalizeRole(b.role)) return false;
 
   // Exact-title duplicates that have entered the real application pipeline are
@@ -295,8 +313,8 @@ function roleMatch(a, b) {
  * @returns {number} Parsed score, or 0 when no number is present.
  */
 function parseScore(s) {
-  const m = s.replace(/\*\*/g, '').match(/([\d.]+)/);
-  return m ? parseFloat(m[1]) : 0;
+  const m = s.replace(/\*\*/g, '').match(/(\d+(?:[.,]\d+)?)/);
+  return m ? parseFloat(m[1].replace(',', '.')) : 0;
 }
 
 /**

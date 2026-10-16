@@ -586,6 +586,17 @@ export function extractTrackerReportNumbers(reportCell, notesCell = '') {
   return [...numbers];
 }
 
+export function linkedReportNumbers(reportCell, notesCell) {
+  const link = String(reportCell ?? '').match(/\[([^\]]*)\]\(([^)]+)\)/);
+  if (!link) return extractTrackerReportNumbers(reportCell, notesCell);
+  // Reuse the tracker's canonical local-target validation. It rejects HTTP(S)
+  // and protocol-relative links, and returns both numbers on a label/target
+  // mismatch. Exactly one number therefore proves a local, self-consistent
+  // report link. A present-but-invalid link must not fall back to Notes.
+  const validated = extractTrackerReportNumbers(reportCell);
+  return validated.length === 1 ? validated : [];
+}
+
 /**
  * Report links inside a free-form Notes cell.
  *

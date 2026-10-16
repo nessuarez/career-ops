@@ -104,7 +104,7 @@ Catatan:
 ## Langkah 6 -- Setelah melamar (opsional)
 
 Jika kandidat mengonfirmasi lamaran sudah dikirim:
-1. Perbarui status dari "Evaluated" menjadi "Applied" dengan `node set-status.mjs <report#> Applied` (jangan mengedit tabel `applications.md` secara manual)
+1. Perbarui status dari "Evaluated" menjadi "Applied" dengan `node set-status.mjs --report <report#> Applied` (jangan mengedit tabel `applications.md` secara manual)
 2. Perbarui Blok G report dengan jawaban final
 3. Sarankan langkah berikutnya: `/career-ops contacto` untuk outreach LinkedIn ke hiring manager
 

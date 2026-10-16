@@ -27,6 +27,18 @@ const HYDRATING_CODES = new Set(['insufficient_content', 'no_apply_control']);
 // while such a frame is present.
 const FRAME_CONTENT_TIMEOUT_MS = 6_000;
 const FRAME_CONTENT_POLL_MS = 500;
+// A failed navigation is not over when page.goto rejects: Chromium commits its
+// error page (chrome-error://chromewebdata/) just after, 1-69 ms later over 36
+// failed loads (a host with no address, four kinds of TLS failure). Playwright
+// reports a goto that is still waiting when that commit lands as "interrupted
+// by another navigation" (microsoft/playwright#35944), and Chromium goes on
+// loading the URL that goto asked for, whose late commit then interrupts the
+// goto after it. On the one page that check-liveness and scan --verify share,
+// one such failure turned the checks after it into navigation_errors. So a
+// check whose navigation failed waits for that commit before it returns, up to
+// this long. A goto that timed out has nothing to wait for: no error page
+// commits, and the next goto cancels it.
+const FAILED_NAVIGATION_COMMIT_MS = 2_000;
 
 // BambooHR's client bundle can throw during first paint — a failed
 // /globals/locale request followed by an uncaught TypeError reading
@@ -369,6 +381,30 @@ export async function installLivenessRouteGuard(page) {
   }
 }
 
+// One navigation of the page (a goto or a reload). If it fails, wait for the
+// main frame to commit Chromium's error page, so the page is settled for
+// whatever navigates it next (see FAILED_NAVIGATION_COMMIT_MS). No other
+// navigation ends the wait: a child frame's, or the old page changing its own
+// URL (a fragment or history change fires framenavigated too), would let the
+// next goto start before the error page commits and interrupts it. A lighter
+// page double without waitForEvent skips the wait.
+async function navigateSettled(page, navigate) {
+  try {
+    return await navigate();
+  } catch (err) {
+    const canWait = typeof page.waitForEvent === 'function' && typeof page.mainFrame === 'function';
+    if (canWait && err?.name !== 'TimeoutError') {
+      await page
+        .waitForEvent('framenavigated', {
+          predicate: (frame) => frame === page.mainFrame() && frame.url().startsWith('chrome-error:'),
+          timeout: FAILED_NAVIGATION_COMMIT_MS,
+        })
+        .catch(() => {});
+    }
+    throw err;
+  }
+}
+
 export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
   const guardError = rejectPrivateOrInvalid(url);
   if (guardError) {
@@ -379,7 +415,8 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
   }
   await installLivenessRouteGuard(page);
   try {
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS });
+    const response = await navigateSettled(page, () =>
+      page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS }));
     const status = response?.status() ?? 0;
 
     // extraSettleMs is slack for the headed retry, where a JS anti-bot
@@ -555,7 +592,8 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
       try { host = new URL(finalUrl || url).hostname; } catch { /* leave empty, retry test below just fails closed */ }
       if (isBambooHrHost(host)) {
         try {
-          const reloadResponse = await page.reload({ waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS });
+          const reloadResponse = await navigateSettled(page, () =>
+            page.reload({ waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS }));
           const reloadStatus = reloadResponse?.status() ?? status;
           const reloaded = await pollPage(reloadStatus);
           const reloadVerdict = classifyLiveness({ status: reloadStatus, requestedUrl: url, ...reloaded });

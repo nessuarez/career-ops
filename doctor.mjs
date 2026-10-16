@@ -713,6 +713,8 @@ const USER_LAYER_PREREQS = [
   },
 ];
 
+const CLI_NAMES = 'claude, codex, gemini, opencode, qwen, agy or grok';
+
 // The lane variables (CAREER_OPS_PORTALS, CAREER_OPS_PIPELINE) move one file
 // out of the data root, and the scanner reads them (path-resolver.mjs), so
 // doctor has to look where a scan would.
@@ -1032,12 +1034,26 @@ async function main() {
   }
 
   console.log('');
+  const setupMissing = USER_LAYER_PREREQS.filter((prereq) => !prereqPresent(projectRoot, prereq));
+  const setupNote = setupMissing.length > 0
+    ? `Setup is not finished (${setupMissing.length} file${setupMissing.length === 1 ? '' : 's'} missing: ${setupMissing.map(({ path }) => path).join(', ')})`
+    : null;
+  const setupHint = `Open your AI CLI in this folder (${CLI_NAMES}) and it walks you through setup by chatting.`;
   if (failures > 0) {
     console.log(`Result: ${failures} issue${failures === 1 ? '' : 's'} found. Fix them and run \`npm run doctor\` again.`);
+    if (setupNote) {
+      console.log(`${setupNote}.`);
+      console.log(setupHint);
+    }
     process.exit(1);
   } else {
     const warnNote = warnings > 0 ? ` (${warnings} warning${warnings === 1 ? '' : 's'} — see above)` : '';
-    console.log(`Result: All checks passed${warnNote}. You're ready to go! Run \`claude\` (or \`opencode\`) to start.`);
+    if (setupNote) {
+      console.log(`Result: ${setupNote}${warnNote}.`);
+      console.log(setupHint);
+    } else {
+      console.log(`Result: All checks passed${warnNote}. You're ready to go! Open your AI CLI in this folder (${CLI_NAMES}) to start.`);
+    }
     console.log('');
     console.log('Join the community: https://discord.gg/8pRpHETxa4');
     console.log('Read the manifesto: `npm run manifesto` — a new way of job searching is taking shape, and you are now part of it.');
@@ -1108,6 +1124,8 @@ function unpersonalizedFiles(root) {
 }
 
 function checkPersonalization(root) {
+  const absent = PERSONALIZATION_FILES.filter(({ path }) => !existsSync(join(root, ...path.split('/'))));
+  if (absent.length === PERSONALIZATION_FILES.length) return null;
   const stale = unpersonalizedFiles(root);
   if (stale.length === 0) {
     return { label: 'Personalization files customized', pass: true };

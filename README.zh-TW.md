@@ -23,6 +23,8 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
+<p align="center"><a href="https://career-ops.org/zh?utm_source=readme&utm_content=zh-tw">網站目前只有簡體中文版：career-ops.org/zh</a></p>
+
 <!-- The non-breaking spaces (&nbsp;) and word joiners (&#8288;) below decide where each line wraps on a phone. Keep them when editing. -->
 
 <p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;由 <a href="https://github.com/santifer"><strong>@santifer</strong></a> 建立</p>

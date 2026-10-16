@@ -1,4 +1,4 @@
-import { resolveColumns, parseTrackerRow, extractTrackerReportNumbers, reportUrlForNumbers } from './tracker-parse.mjs';
+import { resolveColumns, parseTrackerRow, linkedReportNumbers, reportUrlForNumbers } from './tracker-parse.mjs';
 
 // Portals write closure banners with typographic punctuation and accents:
 // WTTJ renders "Cette offre n’est plus disponible." with U+2019, not ASCII "'".
@@ -382,6 +382,9 @@ export const DEFAULT_TRACKER_STATUSES = ['evaluated', 'applied'];
 
 const isWebUrl = (url) => /^https?:\/\//i.test(url);
 
+const rowPostingUrl = (row, reportsRoot) => (isWebUrl(row.url) ? row.url
+  : reportUrlForNumbers(linkedReportNumbers(row.report, row.notes), reportsRoot, isWebUrl));
+
 /**
  * Which tracker rows a liveness sweep checks, and at which posting URL: the
  * row's own URL cell, else the **URL:** of its report.
@@ -400,12 +403,48 @@ export function trackerLivenessTargets(trackerText, { statuses = DEFAULT_TRACKER
   for (const line of lines) {
     const row = parseTrackerRow(line, colmap);
     if (!row || !wanted.has(row.status.trim().toLowerCase())) continue;
-    const url = isWebUrl(row.url) ? row.url
-      : reportUrlForNumbers(extractTrackerReportNumbers(row.report, row.notes), reportsRoot, isWebUrl);
+    const url = rowPostingUrl(row, reportsRoot);
     if (!url) { noUrl.push(row.num); continue; }
     if (seen.has(url)) continue;
     seen.add(url);
     targets.push({ num: row.num, company: row.company, role: row.role, status: row.status, url });
   }
   return { targets, noUrl };
+}
+
+export const DEFAULT_DISCARD_STATUSES = ['evaluated'];
+
+/**
+ * Closed-posting note stamped onto Discarded rows.
+ * @param {string} [day] YYYY-MM-DD (defaults to caller-supplied today)
+ */
+export function postingClosedNote(day) {
+  return `posting closed ${day}`;
+}
+
+/**
+ * Every tracker row in `statuses` whose posting URL is in `expiredUrls`.
+ * Unlike trackerLivenessTargets, this keeps duplicate rows that share a URL
+ * so a single expired verdict can discard every Evaluated copy.
+ *
+ * @param {string} trackerText
+ * @param {Iterable<string>} expiredUrls
+ * @param {{statuses?: string[], reportsRoot?: string}} [options]
+ * @returns {{num: number, company: string, role: string, status: string, url: string}[]}
+ */
+export function planExpiredDiscards(trackerText, expiredUrls, { statuses = DEFAULT_DISCARD_STATUSES, reportsRoot } = {}) {
+  const wanted = new Set(statuses.map((s) => s.trim().toLowerCase()).filter(Boolean));
+  const expired = new Set([...expiredUrls].filter(Boolean));
+  if (expired.size === 0 || wanted.size === 0) return [];
+  const lines = String(trackerText ?? '').split(/\r?\n/);
+  const colmap = resolveColumns(lines);
+  const rows = [];
+  for (const line of lines) {
+    const row = parseTrackerRow(line, colmap);
+    if (!row || !wanted.has(row.status.trim().toLowerCase())) continue;
+    const url = rowPostingUrl(row, reportsRoot);
+    if (!url || !expired.has(url)) continue;
+    rows.push({ num: row.num, company: row.company, role: row.role, status: row.status, url });
+  }
+  return rows;
 }

@@ -98,7 +98,12 @@ export default {
   (never bare `fetch`); `ctx.fetchResponse` returns the raw `Response` when
   you need headers. Optional `ctx.maxPages`, `ctx.sleep(ms)` and
   `ctx.dedupIncludeLanguage` (whether the scan keeps a posting's language
-  versions apart — fetch extra versions only when it is `true`). Returns a
+  versions apart — fetch extra versions only when it is `true`) and
+  `ctx.preferredLanguageRank(code)` (present when `portals.yml` sets
+  `preferred_languages`: a provider that returns language versions
+  selectively also returns the ranked ones, after each posting's default
+  version, so the scan can keep the preferred one; references
+  `providers/personio.mjs` and `providers/recruitee.mjs`). Returns a
   normalized `Job[]`.
 - `Job` — `title`, `url` (required, absolute — this is the dedup key),
   `company`, `location`; optional `postedAt` (epoch ms) and `description`.

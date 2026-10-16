@@ -311,15 +311,21 @@ function put(dir, path, bytes) {
   writeFileSync(destination, bytes);
 }
 
+/** Child git must not inherit GIT_DIR / GIT_INDEX_FILE / the rest of GIT_*. */
+function rollbackChildEnv() {
+  const env = { ...process.env, CAREER_OPS_GIT_TIMEOUT_MS: '10000' };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('GIT_')) delete env[key];
+  }
+  return env;
+}
+
 function runRollback(dir, timeout = 30_000) {
   return spawnSync(process.execPath, ['update-system.mjs', 'rollback'], {
     cwd: dir,
     encoding: 'utf8',
     timeout,
-    env: {
-      ...process.env,
-      CAREER_OPS_GIT_TIMEOUT_MS: '10000',
-    },
+    env: rollbackChildEnv(),
   });
 }
 
@@ -1001,7 +1007,35 @@ function readMaybe(path) {
   }
 }
 
-// ── 17. Real CLI: a failed rollback commit is reported, not hidden ──
+// ── 17. Real CLI: a newer unpaired backup does not hide an older paired one ──
+{
+  const fixture = seedRollbackRepo('co-rollback-offline-retry-', {
+    paired: true,
+    fetchTarget: true,
+  });
+  const { dir, g, backup, backupCommit } = fixture;
+  const decoy = 'backup-pre-update-1.2.3-20260907T140000Z';
+  try {
+    g('branch', decoy, backupCommit);
+    const result = runRollback(dir);
+    const output = outputOf(result);
+    check(
+      result.status === 0 && new RegExp(`Rolling back to: ${backup}`).test(output),
+      'rollback uses the older paired backup when a newer one has no target',
+      `offline-retry rollback did not select ${backup}: ${output}`,
+    );
+    check(
+      !existsSync(join(dir, 'target-only.mjs'))
+        && !existsSync(join(dir, 'system/nested/target-only.txt')),
+      'rollback removes target-only files using that older paired target',
+      'offline-retry rollback left a target-only file behind',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ── 18. Real CLI: a failed rollback commit is reported, not hidden ──
 {
   const fixture = seedRollbackRepo('co-rollback-commit-fails-', {
     paired: true,

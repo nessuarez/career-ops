@@ -72,7 +72,7 @@ const USAGE = `
   node rank-pipeline.mjs [--limit N] [--cli <name>] [--model <name>] [--dry-run]
 
     --limit N     max entries to rank this run (default ${DEFAULT_LIMIT}, ceiling ${LIMIT_CEILING})
-    --cli <name>  force a CLI instead of auto-detecting
+    --cli <name>  force a CLI instead of $CAREER_OPS_CLI or auto-detection
     --model <n>   passed through to the CLI when it accepts one
     --dry-run     print the annotations, write nothing
     --self-test   run the in-memory suite (no subprocess, no network)
@@ -314,9 +314,10 @@ async function main(args) {
     return 0;
   }
 
+  const active = CLI_CANDIDATES.find(c => c.bin === process.env.CAREER_OPS_CLI);
   const cli = forced
     ? CLI_CANDIDATES.find(c => c.bin === forced) ?? { bin: forced, args: p => ['-p', p] }
-    : detectCli();
+    : detectCli(active ? [active, ...CLI_CANDIDATES] : CLI_CANDIDATES);
   if (!cli) {
     console.error('No supported agent CLI found (tried: %s).', CLI_CANDIDATES.map(c => c.bin).join(', '));
     console.error('Install one, or pass --cli <name>. See the Headless / Batch Mode table in AGENTS.md.');

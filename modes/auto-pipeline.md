@@ -22,6 +22,8 @@ If the input is a **URL** (not pasted JD text), follow this strategy to extract 
 
 **If the input is JD text** (not a URL): use directly, without needing to fetch.
 
+**Session title:** once a real JD is read and the role and employer are known, apply the router's **Session Title** rule (`SKILL.md`, #5303): rename an interactive session to `{Role}, {Company}` when the host allows it. An undisclosed-employer agency posting waits for Step 1's **Agency confirmation handoff**, then becomes `{Role}, via {Agency}`.
+
 ## Step 0.5 — Liveness gate
 
 Before running any evaluation, confirm the posting is still live. The Step 0 Playwright snapshot already holds the evidence — judge it now, before spending tokens on the A-G evaluation, the report, or a PDF. A 404/expired page silently served as a static fallback ("position filled", empty shell) otherwise scores a full evaluation against phantom content.

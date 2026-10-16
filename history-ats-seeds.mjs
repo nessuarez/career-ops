@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { atsVendorOf } from './ats-vendor.mjs';
 import { parseScanHistoryLine } from './lib/scan-history-columns.mjs';
-import { detectColumns, extractCellUrl, extractTrackerReportNumbers, isHeaderRow, isSeparatorRow, reportUrlForNumbers as reportUrlFromReports } from './tracker-parse.mjs';
+import { detectColumns, extractCellUrl, isHeaderRow, isSeparatorRow, linkedReportNumbers, reportUrlForNumbers as reportUrlFromReports } from './tracker-parse.mjs';
 import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
 import { resolveWorkspaceRoot } from './tracker-utils.mjs';
 
@@ -62,17 +62,6 @@ function seedOf(company, rawUrl, source) {
     careersUrl,
     source,
   };
-}
-
-function linkedReportNumbers(reportCell, notesCell) {
-  const link = String(reportCell ?? '').match(/\[([^\]]*)\]\(([^)]+)\)/);
-  if (!link) return extractTrackerReportNumbers(reportCell, notesCell);
-  // Reuse the tracker's canonical local-target validation. It rejects HTTP(S)
-  // and protocol-relative links, and returns both numbers on a label/target
-  // mismatch. Exactly one number therefore proves a local, self-consistent
-  // report link. A present-but-invalid link must not fall back to Notes.
-  const validated = extractTrackerReportNumbers(reportCell);
-  return validated.length === 1 ? validated : [];
 }
 
 export function reportUrlForNumbers(reportNumbers, reportsRoot, accept = atsVendorOf) {

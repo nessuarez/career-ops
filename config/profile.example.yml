@@ -148,6 +148,12 @@ language:
 #   responded_subsequent_days: 3
 #   interview_thankyou_days: 1
 
+# (Optional) Rename the session after the posting it handles, e.g.
+# "VP Infrastructure, Acme Health", in hosts that let the agent set its own
+# session title. Single-posting modes only; a no-op elsewhere. Default: auto.
+# Set to off to keep your own titles.
+# session_title: auto
+
 # Controls which model tier evaluates your offers. Valid values:
 #   economy  -- cheapest/fastest model, no extended thinking. Best for high-volume scanning.
 #   standard -- balanced model, no extended thinking. Default if this key is absent.
