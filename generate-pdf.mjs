@@ -5,13 +5,14 @@
  *
  * Usage:
  *   node career-ops/generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4] [--report=NNN] [--kind=cv|cover] [--allow-reorder] [--allow-nonchronological] [--max-pages=N] [--strict-pages] [--skip-fact-check]
- *   node career-ops/generate-pdf.mjs --batch=<manifest.json> [--format=letter|a4] [--allow-reorder] [--allow-nonchronological] [--max-pages=N] [--strict-pages]
+ *   node career-ops/generate-pdf.mjs --batch=<manifest.json> [--format=letter|a4] [--allow-reorder] [--allow-nonchronological] [--max-pages=N] [--strict-pages] [--skip-fact-check]
  *
  * --batch renders every document in a JSON manifest (an array of
  * {input, output, format?, reportNum?}) through ONE shared Chromium instead of
  * relaunching per document. One failing document is isolated and recorded; the
  * rest still render. Results are written to <manifest>.results.json and the
- * process exits non-zero if any document failed (#2384).
+ * process exits non-zero if any document failed (#2384). Relative input and
+ * output paths resolve against the manifest's folder, not process.cwd().
  *
  * --report links the generated PDF to its tracker/report number and records
  * the linkage in data/pdf-index.tsv so downstream tools (e.g. the TUI
@@ -267,7 +268,12 @@ function normalizeTextForATS(html) {
     t = t.replace(/\s*\u2190\s*/g, () => { bump('left-arrow', 1); return ' from '; });
     t = t.replace(/\s*[\u2191\u2193]\s*/g, () => { bump('vert-arrow', 1); return ' '; });
     // Middle dot and bullet glyphs garble in some extractors \u2014 replace with pipe.
-    t = t.replace(/\s*\u00B7\s*/g, () => { bump('middot', 1); return ' | '; });
+    // Catalan l·l is a letter pair inside a word (intel·ligència), not a separator.
+    t = t.replace(/\s*\u00B7\s*/g, (m, at, all) => {
+      if (m === '\u00B7' && /[lL]/.test(all[at - 1] ?? '') && /[lL]/.test(all[at + 1] ?? '')) return m;
+      bump('middot', 1);
+      return ' | ';
+    });
     t = t.replace(/\s*\u2022\s*/g, () => { bump('bullet', 1); return ' | '; });
     // Currency symbols sometimes stripped by font-subsetted PDFs \u2014 spell out
     // the unambiguous ones. \u00A5 is intentionally NOT converted: it maps to both
@@ -1424,6 +1430,51 @@ async function updatePDFManifest(reportNum, pdfPath, htmlPath, format, kind) {
 }
 
 /**
+ * Fact gate shared by the single-file and --batch paths.
+ *
+ * generate-cover-letter.mjs already blocks on assertFacts before importing
+ * Playwright, on the reasoning that a failed gate must not leave a misleading
+ * artifact behind. A tailored CV is the same class of document and carries the
+ * numbers a reader acts on, but the CV path enforced the gate only as an
+ * instructed step in the mode prompts — so a programmatic caller (a bridge, a
+ * script, a batch run) rendered inflated metrics in silence. One function for
+ * both paths, because the batch run is exactly that caller and for a while it
+ * was the path with no gate at all.
+ *
+ * Callers pass the normalized HTML and skip the call when --skip-fact-check is
+ * set or the workspace has no cv.md to check against.
+ *
+ * @param {string} html - Normalized HTML, as it will be printed.
+ * @param {string} label - Document name for the error and warning lines.
+ * @returns {Promise<void>} Resolves when the document passes or only warns.
+ * @throws {Error} When a metric, fact or forbidden phrase blocks the document.
+ */
+async function runFactGate(html, label) {
+  // Imported lazily, by the callers' guard. A static import is resolved at module
+  // load whether or not the gate runs, and the page-budget/batch suites copy
+  // generate-pdf.mjs alone into a temp workspace — a static import of a sibling
+  // that isn't copied made every one of those suites die with
+  // ERR_MODULE_NOT_FOUND before reaching the behaviour under test. Those
+  // fixtures also ship no cv.md, so the gate is never entered there. If the
+  // module is genuinely missing in a real workspace this throws and the render
+  // fails, which is the correct direction to fail for a fact gate.
+  const { assertFacts, printAdvisoryFacts } = await import('./verify-cv-facts.mjs');
+  const factCheck = assertFacts(html, { label });
+  // Ahead of the verdict, because it qualifies it: with no config the phrase
+  // lists are empty, so a "passed" below covers metrics and facts only.
+  if (factCheck.configMissing) {
+    console.warn('⚠️  No config/cv-facts.json — forbidden/advisory phrase checks did not run.');
+  }
+  if (factCheck.verdict === 'warn') {
+    console.warn(`⚠️  CV fact check warning: ${label}`);
+    for (const phrase of factCheck.warnings) console.warn(`  - advisory phrase: ${phrase}`);
+    printAdvisoryFacts(factCheck.advisoryFacts, console.warn);
+  } else {
+    console.log(`✅ Fact check passed: ${label}`);
+  }
+}
+
+/**
  * CLI entrypoint that reads an HTML file, applies ATS-safe normalization, and
  * renders the PDF while preserving report/source metadata for the manifest.
  *
@@ -1548,16 +1599,18 @@ async function generatePDF() {
       console.error('--kind is not valid with --batch. Set "kind" per entry in the manifest instead.');
       process.exit(1);
     }
-    return runBatchFromManifest(batchManifestPath, { format, maxPages, strictPages, allowReorder, allowNonChronological });
+    return runBatchFromManifest(batchManifestPath, { format, maxPages, strictPages, allowReorder, allowNonChronological, skipFactCheck });
   }
 
   if (!inputPath || !outputPath) {
-    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4] [--report=NNN] [--kind=cv|cover] [--allow-reorder] [--allow-nonchronological] [--max-pages=N] [--strict-pages]');
-    console.error('   or: node generate-pdf.mjs --batch=<manifest.json> [--format=letter|a4] [--allow-reorder] [--allow-nonchronological] [--max-pages=N] [--strict-pages]');
+    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4] [--report=NNN] [--kind=cv|cover] [--allow-reorder] [--allow-nonchronological] [--max-pages=N] [--strict-pages] [--skip-fact-check]');
+    console.error('   or: node generate-pdf.mjs --batch=<manifest.json> [--format=letter|a4] [--allow-reorder] [--allow-nonchronological] [--max-pages=N] [--strict-pages] [--skip-fact-check]');
     console.error('');
     console.error('Batch mode renders every document in the JSON manifest (an array of');
     console.error('{input, output, format?, reportNum?, kind?}) through one shared Chromium and writes');
     console.error('<manifest>.results.json; it exits non-zero if any document fails.');
+    console.error('Relative input and output paths in the manifest resolve against the');
+    console.error("manifest's own folder, not the current directory.");
     console.error('');
     console.error('This script only converts an already-built HTML file to PDF.');
     console.error('The input HTML is produced by the pdf mode: the agent fills cv-template.html');
@@ -1633,37 +1686,8 @@ async function generatePDF() {
     console.log(`🧹 ATS normalization: ${totalReplacements} replacements (${breakdown})`);
   }
 
-  // Fact gate. generate-cover-letter.mjs already blocks on assertFacts before
-  // importing Playwright, on the reasoning that a failed gate must not leave a
-  // misleading artifact behind. A tailored CV is the same class of document and
-  // carries the numbers a reader acts on, but the CV path enforced the gate only
-  // as an instructed step in the mode prompts — so a programmatic caller (a
-  // bridge, a script, a batch run) rendered inflated metrics in silence. Gate the
-  // normalized HTML, which is the document that actually prints.
-  if (!skipFactCheck && cvMarkdown) {
-    // Imported lazily, INSIDE the guard. A static import is resolved at module
-    // load whether or not this branch runs, and the page-budget/batch suites copy
-    // generate-pdf.mjs alone into a temp workspace — a static import of a sibling
-    // that isn't copied made every one of those suites die with
-    // ERR_MODULE_NOT_FOUND before reaching the behaviour under test. Those
-    // fixtures also ship no cv.md, so this branch is never entered there. If the
-    // module is genuinely missing in a real workspace this throws and the render
-    // fails, which is the correct direction to fail for a fact gate.
-    const { assertFacts, printAdvisoryFacts } = await import('./verify-cv-facts.mjs');
-    const factCheck = assertFacts(html, { label: basename(inputPath) });
-    // Ahead of the verdict, because it qualifies it: with no config the phrase
-    // lists are empty, so a "passed" below covers metrics and facts only.
-    if (factCheck.configMissing) {
-      console.warn('⚠️  No config/cv-facts.json — forbidden/advisory phrase checks did not run.');
-    }
-    if (factCheck.verdict === 'warn') {
-      console.warn(`⚠️  CV fact check warning: ${basename(inputPath)}`);
-      for (const phrase of factCheck.warnings) console.warn(`  - advisory phrase: ${phrase}`);
-      printAdvisoryFacts(factCheck.advisoryFacts, console.warn);
-    } else {
-      console.log('✅ Fact check passed');
-    }
-  }
+  // Fact gate, on the normalized HTML: the document that actually prints.
+  if (!skipFactCheck && cvMarkdown) await runFactGate(html, basename(inputPath));
 
   return renderHtmlToPdf(html, outputPath, {
     format,
@@ -1683,7 +1707,8 @@ async function generatePDF() {
  * The manifest is a JSON array of {input, output, format?, reportNum?}. Each
  * entry is validated and its HTML read + ATS-normalized independently: a bad
  * entry (missing file, bad format, escaping output path, scrambled section
- * order) is recorded as a failure and skipped so it can never sink the rest of
+ * order, a metric or fact the sources do not back) is recorded as a failure and
+ * skipped so it can never sink the rest of
  * the batch. Surviving entries render through one shared Chromium (renderBatch).
  *
  * A results manifest is always written next to the input manifest as
@@ -1693,7 +1718,7 @@ async function generatePDF() {
  * for success; it exits zero only when every document rendered.
  *
  * @param {string} manifestPath - Path to the JSON manifest.
- * @param {{format: string, maxPages: number, strictPages: boolean, allowReorder: boolean, allowNonChronological: boolean}} globals
+ * @param {{format: string, maxPages: number, strictPages: boolean, allowReorder: boolean, allowNonChronological: boolean, skipFactCheck: boolean}} globals
  * @returns {Promise<{ok: number, failed: number, results: Array}>}
  */
 async function runBatchFromManifest(manifestPath, globals) {
@@ -1807,6 +1832,10 @@ async function runBatchFromManifest(manifestPath, globals) {
       validateCvSectionOrder(html, cvMarkdown, { allowReorder: globals.allowReorder });
       validateCvExperienceOrder(html, { allowNonChronological: globals.allowNonChronological });
       html = normalizeTextForATS(html).html;
+      // Same gate, same guard and same place as the single render. A blocked
+      // entry throws into the catch below: it is recorded as failed and never
+      // reaches Chromium, and the rest of the batch still renders.
+      if (!globals.skipFactCheck && cvMarkdown) await runFactGate(html, basename(entryInput));
 
       entries.push({
         _idx: i,

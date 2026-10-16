@@ -23,9 +23,11 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
+<p align="center"><a href="https://career-ops.org/de/docs?utm_source=readme&utm_content=de">Vollständige Dokumentation auf Deutsch: career-ops.org/de/docs</a></p>
+
 <!-- The non-breaking spaces (&nbsp;) and word joiners (&#8288;) below decide where each line wraps on a phone. Keep them when editing. -->
 
-<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;<a href="https://github.com/santifer"><strong>santifer</strong></a></p>
+<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;Erstellt von <a href="https://github.com/santifer"><strong>@santifer</strong></a></p>
 
 <p align="center">
 <strong>Monatelang Lebensläufe ins Leere&nbsp;geschickt.</strong><br>
@@ -367,7 +369,7 @@ agy
 /career-ops tracker
 ```
 
-Der Skill ist nach dem offenen Standard in `.agents/skills/career-ops/SKILL.md` definiert und für jede unterstützte CLI verlinkt oder referenziert (z. B. `.claude/`, `.cursor/`, `.qwen/`, `.antigravitycli/`, `.grok/`).
+Der Skill ist nach dem offenen Standard in `.agents/skills/career-ops/SKILL.md` definiert und für jede unterstützte CLI verlinkt oder referenziert (z. B. `.claude/`, `.qwen/`, `.antigravitycli/`, `.grok/`). Cursor entdeckt den gemeinsamen Skill in `.agents/skills/` automatisch.
 
 ## Codex-Integration
 

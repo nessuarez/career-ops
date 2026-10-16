@@ -25,7 +25,7 @@
 
 <!-- The non-breaking spaces (&nbsp;) and word joiners (&#8288;) below decide where each line wraps on a phone. Keep them when editing. -->
 
-<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;<a href="https://github.com/santifer"><strong>santifer</strong></a></p>
+<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;أنشأه <a href="https://github.com/santifer"><strong>@santifer</strong></a></p>
 
 <p align="center" dir="rtl">
 <strong>أشهر من إرسال السير الذاتية إلى&nbsp;الصمت.</strong><br>
@@ -367,7 +367,7 @@ agy
 /career-ops tracker
 ```
 
-المهارة معرّفة وفق المعيار المفتوح في `.agents/skills/career-ops/SKILL.md` ومربوطة برابط رمزي أو مُشار إليها لكل واجهة مدعومة (مثل `.claude/` و`.cursor/` و`.qwen/` و`.antigravitycli/` و`.grok/`).
+المهارة معرّفة وفق المعيار المفتوح في `.agents/skills/career-ops/SKILL.md` ومربوطة برابط رمزي أو مُشار إليها لكل واجهة مدعومة (مثل `.claude/` و`.qwen/` و`.antigravitycli/` و`.grok/`). يكتشف Cursor المهارة المشتركة تلقائيًا في `.agents/skills/`.
 
 ## تكامل Codex
 

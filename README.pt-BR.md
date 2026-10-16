@@ -23,9 +23,11 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
+<p align="center"><a href="https://career-ops.org/pt/docs?utm_source=readme&utm_content=pt">Documentação completa em português: career-ops.org/pt/docs</a></p>
+
 <!-- The non-breaking spaces (&nbsp;) and word joiners (&#8288;) below decide where each line wraps on a phone. Keep them when editing. -->
 
-<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;<a href="https://github.com/santifer"><strong>santifer</strong></a></p>
+<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;Criado por <a href="https://github.com/santifer"><strong>@santifer</strong></a></p>
 
 <p align="center">
 <strong>Meses mandando currículos para o&nbsp;silêncio.</strong><br>
@@ -367,7 +369,7 @@ agy
 /career-ops tracker
 ```
 
-A skill é definida com o padrão aberto em `.agents/skills/career-ops/SKILL.md` e vinculada ou referenciada para cada CLI suportada (por exemplo `.claude/`, `.cursor/`, `.qwen/`, `.antigravitycli/`, `.grok/`).
+A skill é definida com o padrão aberto em `.agents/skills/career-ops/SKILL.md` e vinculada ou referenciada para cada CLI suportada (por exemplo `.claude/`, `.qwen/`, `.antigravitycli/`, `.grok/`). O Cursor descobre automaticamente a skill compartilhada em `.agents/skills/`.
 
 ## Integração com Codex
 

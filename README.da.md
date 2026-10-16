@@ -25,7 +25,7 @@
 
 <!-- The non-breaking spaces (&nbsp;) and word joiners (&#8288;) below decide where each line wraps on a phone. Keep them when editing. -->
 
-<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;<a href="https://github.com/santifer"><strong>santifer</strong></a></p>
+<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;Skabt af <a href="https://github.com/santifer"><strong>@santifer</strong></a></p>
 
 <p align="center">
 <strong>Måneder med at sende CV'er ud i&nbsp;stilheden.</strong><br>
@@ -367,7 +367,7 @@ agy
 /career-ops tracker
 ```
 
-Skillet er defineret efter den åbne standard i `.agents/skills/career-ops/SKILL.md` og symlinket/refereret for hver understøttet CLI (fx `.claude/`, `.cursor/`, `.qwen/`, `.antigravitycli/`, `.grok/`).
+Skillet er defineret efter den åbne standard i `.agents/skills/career-ops/SKILL.md` og symlinket/refereret for hver understøttet CLI (fx `.claude/`, `.qwen/`, `.antigravitycli/`, `.grok/`). Cursor finder automatisk det fælles skill i `.agents/skills/`.
 
 ## Codex-integration
 

@@ -23,9 +23,11 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
+<p align="center"><a href="https://career-ops.org/zh/docs?utm_source=readme&utm_content=zh">完整中文文档：career-ops.org/zh/docs</a></p>
+
 <!-- The non-breaking spaces (&nbsp;) and word joiners (&#8288;) below decide where each line wraps on a phone. Keep them when editing. -->
 
-<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;<a href="https://github.com/santifer"><strong>santifer</strong></a></p>
+<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;由 <a href="https://github.com/santifer"><strong>@santifer</strong></a> 创建</p>
 
 <p align="center">
 <strong>几个月投出的简历，全都石&#8288;沉&#8288;大&#8288;海。</strong><br>
@@ -367,7 +369,7 @@ agy
 /career-ops tracker
 ```
 
-这个 skill 按开放标准定义在 `.agents/skills/career-ops/SKILL.md` 中，并为每个支持的 CLI（例如 `.claude/`、`.cursor/`、`.qwen/`、`.antigravitycli/`、`.grok/`）建立了符号链接或引用。
+这个 skill 按开放标准定义在 `.agents/skills/career-ops/SKILL.md` 中，并为每个支持的 CLI（例如 `.claude/`、`.qwen/`、`.antigravitycli/`、`.grok/`）建立了符号链接或引用。 Cursor 会自动发现 `.agents/skills/` 中的共享 skill。
 
 ## Codex 集成
 
