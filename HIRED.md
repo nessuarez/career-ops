@@ -15,6 +15,13 @@ nothing leaves your machine until you press Submit yourself).
 
 <!-- ENTRIES -->
 
+<!-- hire n=19 level=role role="Project Manager" sector="Mid Size Tech - Health" geo="Hibrid - Brazil" link="https://github.com/career-ops-hq/career-ops/issues/5786" -->
+### Hire #19
+
+> Career-Ops changed the game and completely switched my approach to jobhunt. Interviews started to appear because my career facts were being finally shown in my curriculum and I had
+
+**Project Manager** · Mid Size Tech - Health · Hibrid - Brazil · [story →](https://github.com/career-ops-hq/career-ops/issues/5786)
+
 <!-- hire n=18 level=handle handle=bravely role="Technical Lead Software Engineer" sector="Remote-first Health-tech Startup" geo="Remote US" weeks=22 link="https://github.com/career-ops-hq/career-ops/issues/5761" -->
 ### Hire #18
 
