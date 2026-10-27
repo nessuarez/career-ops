@@ -6,13 +6,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Returns the resolved career-ops data directory root.
- * Priority: process.env.CAREER_OPS_ROOT or process.env.CAREER_OPS_DATA_DIR >
+ * Priority: process.env.CAREER_OPS_DATA_DIR > process.env.CAREER_OPS_ROOT >
  * .career-ops-data marker file > codebase root (__dirname).
- * 
+ *
+ * DATA_DIR wins over ROOT because CAREER_OPS_ROOT is also used by wrappers
+ * (eval-or.sh) to locate the tool's own code + .env; pointing getCareerOpsRoot()
+ * at it made openai-eval.mjs look for cv.md in the tool repo instead of the
+ * personal data repo (missing-cv bug, 2026-10-22).
+ *
  * @returns {string} Absolute path to the data root
  */
 export function getCareerOpsRoot() {
-  const env = process.env.CAREER_OPS_ROOT?.trim() || process.env.CAREER_OPS_DATA_DIR?.trim();
+  const env = process.env.CAREER_OPS_DATA_DIR?.trim() || process.env.CAREER_OPS_ROOT?.trim();
   if (env) {
     return resolve(__dirname, env);
   }
