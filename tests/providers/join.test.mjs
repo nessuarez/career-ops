@@ -251,12 +251,6 @@ try {
   if (bigBoardJobs.joinTruncated === true) pass('join.fetch() tags a cap-truncated board joinTruncated');
   else fail(`join cap-truncated board should carry joinTruncated, got ${bigBoardJobs.joinTruncated}`);
 
-  // fetch() — a board that ends exactly at the cap is complete, not truncated.
-  const exactCtx = makeCtx(({ paginationPage }) => gqlPage([job(paginationPage.page)], 3));
-  const exactJobs = await joinProvider.fetch({ ...entry, max_pages: 3 }, exactCtx);
-  if (exactJobs.length === 3 && exactJobs.joinTruncated === undefined) pass('join.fetch() does not tag a board whose pageCount equals the cap');
-  else fail(`join.fetch() exact-cap board wrong: jobs=${exactJobs.length}, tag=${exactJobs.joinTruncated}`);
-
   // fetch() — entry.max_pages overrides the default, clamped at MAX_PAGES_CAP.
   const overrideCtx = makeCtx(({ paginationPage }) => gqlPage([job(paginationPage.page)], 9999));
   const overrideJobs = await joinProvider.fetch({ ...entry, max_pages: 3 }, overrideCtx);

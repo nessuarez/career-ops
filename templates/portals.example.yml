@@ -1242,8 +1242,6 @@ search_queries:
 #   zoho-recruit    <tenant>.zohorecruit.com  (any path; the board is always read from /jobs/Careers)
 #   computrabajo    <country>.computrabajo.com/<search path>  (LatAm board; e.g. co.computrabajo.com/trabajo-de-sistemas)
 #   magneto         www.magneto365.com/co/<search path>       (Colombia board; e.g. /co/trabajos/buscar/tecnologia)
-#   paylocity       recruiting.paylocity.com/Recruiting/Jobs/All/<board-guid>  (or api: field; a posting's
-#                   /Jobs/Details/<id> link carries no board id and is NOT claimed)
 #
 # When the public careers URL is a branded custom domain (e.g.
 # careers.adyen.com), set `provider: smartrecruiters` explicitly to

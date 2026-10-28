@@ -125,7 +125,6 @@ import { getCareerOpsRoot } from './path-resolver.mjs';
 import {
   claimStatusActivity, appendStatusTransition, statusLogPath, seedFollowupOnApplied, archiveJdOnInterview,
 } from './lib/status-hooks.mjs';
-import { parseStatusLog, replayObservations } from './funnel-velocity.mjs';
 
 // Two roots. CODE_ROOT holds templates/states.yml, which ships with the code;
 // DATA_ROOT is the user's, and getCareerOpsRoot() is the only thing that honours
@@ -172,9 +171,6 @@ const USAGE = `Usage: node set-status.mjs <tracker#|company> <state> [--note "..
                      the writer lock
   --expect-status STATE  Require the row's current status to be STATE, unless it
                      is already <state>; checked under the writer lock
-  --undo             Take back the row's last logged status change: restore the
-                     prior status and retract the change from status-log.tsv.
-                     Replaces <state>
   --force            Allow a numeric selector despite a report-link mismatch, or despite a
                      report-less row whose number another row claims as its report link
   --dry-run          Resolve and validate, but write nothing
@@ -233,7 +229,7 @@ function renderStatesSection() {
 
 const rawArgs = process.argv.slice(2);
 const positional = [];
-const flags = { note: null, replaceNote: null, role: null, on: null, row: null, report: null, reportLink: null, source: null, force: false, dryRun: false, undo: false, repairStatusLog: false, repairFollowup: false, detachJdArchive: false, json: false, expectTracker: null, expectRow: null, expectStatus: null };
+const flags = { note: null, replaceNote: null, role: null, on: null, row: null, report: null, reportLink: null, source: null, force: false, dryRun: false, repairStatusLog: false, repairFollowup: false, detachJdArchive: false, json: false, expectTracker: null, expectRow: null, expectStatus: null };
 const VALUE_FLAGS = { '--note': 'note', '--replace-note': 'replaceNote', '--role': 'role', '--on': 'on', '--row': 'row', '--report': 'report', '--report-link': 'reportLink', '--source': 'source', '--expect-tracker': 'expectTracker', '--expect-row': 'expectRow', '--expect-status': 'expectStatus' };
 
 /**
@@ -697,6 +693,10 @@ if (flags.reportLink !== null && !resolveCanonicalState(oldStatus, states)) {
 if (flags.expectRow !== null && trackerRowIdentity(target) !== flags.expectRow) {
   failWith(EXIT_AMBIGUOUS, 'row-changed', `Tracker #${target.num} changed since review; review it again before retrying`);
 }
+// A status outside states.yml (a hand-typed legacy value) is compared as
+// written rather than refused, so the caller still gets "status changed" and
+// not a usage error for a row it was right to show.
+const statusKey = value => resolveCanonicalState(value, states) ?? String(value ?? '').trim();
 if (flags.expectStatus !== null && statusKey(oldStatus) !== newStatus
     && statusKey(oldStatus) !== statusKey(flags.expectStatus)) {
   failWith(EXIT_AMBIGUOUS, 'status-changed',
@@ -821,32 +821,7 @@ try {
   // tracker file so CAREER_OPS_TRACKER redirects (tests, custom layouts) keep
   // the ledger next to the tracker it describes. Inside the lock window, so
   // concurrent writers can't interleave lines.
-  // An undo retracts the entry it selected even when that entry left the
-  // status as it was (Applied → Applied), or the next undo would pick it again.
-  // The retraction is the undo, so a failed append puts the old status back.
-  if (undone && !flags.dryRun) {
-    statusLogged = appendStatusTransition(APPS_FILE, {
-      num: target.num,
-      date: localToday(),
-      from: '-',
-      to: '-',
-      source: flags.source ?? 'set-status',
-      note: `undo ${undone.from} → ${undone.to}`,
-    });
-    if (!statusLogged) {
-      let restored = !statusChanged;
-      if (statusChanged) {
-        lines[target.lineIdx] = rawLine;
-        try {
-          writeFileAtomic(APPS_FILE, lines.join('\n'));
-          restored = true;
-        } catch { /* reported below */ }
-      }
-      failWith(EXIT_USAGE, 'undo-not-logged', restored
-        ? `Could not log the undo for #${target.num}, so it stays ${oldStatus}`
-        : `Could not log the undo for #${target.num}, and could not put it back to ${oldStatus}; it now reads ${newStatus}`);
-    }
-  } else if (statusChanged && !flags.dryRun) {
+  if (statusChanged && !flags.dryRun) {
     // LOCAL today: the UTC day is TOMORROW for a west-of-Greenwich evening run,
     // so this appended a status-log row dated a day that had not happened yet
     // (#2932, mirroring #2765). status-log.tsv is what funnel-velocity reads for
@@ -953,7 +928,7 @@ const changed = statusChanged || noteChanged;
 // committed and the caller's exit code is about that write — same policy as
 // the status-log append above.
 let followupSeeded = null;
-if (!undone && (statusChanged || flags.repairFollowup) && newStatus === 'Applied') {
+if ((statusChanged || flags.repairFollowup) && newStatus === 'Applied') {
   followupSeeded = await seedFollowupOnApplied(target.num, {
     trackerPath: APPS_FILE,
     // --on is the day the user says the application was sent. Without it,
@@ -976,7 +951,7 @@ if (!undone && (statusChanged || flags.repairFollowup) && newStatus === 'Applied
 // idempotent re-run into an already-Interview row (statusChanged gates that),
 // and does nothing on a dry run.
 let jdArchiveTriggered = null;
-if (!undone && statusChanged && newStatus === 'Interview' && !flags.dryRun) {
+if (statusChanged && newStatus === 'Interview' && !flags.dryRun) {
   jdArchiveTriggered = archiveJdOnInterview(target, {
     trackerPath: APPS_FILE,
     detach: flags.detachJdArchive,
@@ -1013,7 +988,7 @@ const result = {
 };
 
 const oldLabel = resolveCanonicalState(oldStatus, states);
-if (!undone && statusChanged && !flags.dryRun && states.find(s => s.label === oldLabel)?.terminal) {
+if (statusChanged && !flags.dryRun && states.find(s => s.label === oldLabel)?.terminal) {
   console.warn(`⚠ #${target.num} was ${oldLabel}, a terminal state. Reopened as ${newStatus}.`);
 }
 
@@ -1026,7 +1001,7 @@ if (flags.json) {
   // Only when seeding did NOT happen. The advisory predates the seeding above
   // and asked the user to do by hand what now runs for them; leaving it
   // unconditional would read as a contradiction right under "Follow-up seeded".
-  if (!undone && statusChanged && !flags.dryRun && newStatus === 'Applied' && !followupSeeded?.seeded && followupSeeded?.reason !== 'disabled') {
+  if (statusChanged && !flags.dryRun && newStatus === 'Applied' && !followupSeeded?.seeded && followupSeeded?.reason !== 'disabled') {
     console.error('ℹ️  Status is Applied — consider seeding follow-ups in data/follow-ups.md (#1430: node followup-cadence.mjs)');
   }
 }

@@ -55,7 +55,6 @@ export const PATHS = {
   //
   // gemini-eval.mjs:89 and ollama-eval.mjs:56 both already use DATA_ROOT here.
   profile:     join(DATA_ROOT, 'modes', '_profile.md'),
-  custom:      join(DATA_ROOT, 'modes', '_custom.md'),
   profileYml:  getProfilePath(),
   reports:     join(DATA_ROOT, 'reports'),
   // DATA_ROOT, matching gemini-eval.mjs:93. These TSVs are the batch's OUTPUT —

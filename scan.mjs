@@ -4437,7 +4437,6 @@ async function main() {
       }
 
       const declaredFields = normalizeFilterOn(company.filter_on);
-      const companySkipTiers = entrySkipTiers(company);
       const orderedJobs = preferredLanguageRank ? orderByPreferredLanguage(jobs, preferredLanguageRank) : jobs;
       for (const job of orderedJobs) {
         const listingToken = refreshListingKey(job);

@@ -43,12 +43,10 @@ All scripts live in the project root as `.mjs` modules. Most are exposed via
 | `npm run tracker` | `tracker.mjs` | SQLite derived index over applications.md — sync/query/history/export |
 | `npm run find` | `find.mjs` | Resolve a report#/tracker#/company query to its full pipeline identity |
 | `npm run ics-interview -- invite.ics` | `ics-interview.mjs` | Read an interview invite's `.ics` (first VEVENT: start/end/length, time zone, link, organizer) and print a row to paste into `data/active-interviews.md` (read-only) |
-| `npm run panelist-roles -- invite.txt` | `panelist-roles.mjs` | Classify the panelists named in an interview invite (pasted text or `.ics`) by title into recruiter / hiring manager / privacy-compliance / technical / peer / executive, with a one-line prep focus per role (offline, read-only) |
 | `npm run invite-match` | `invite-match.mjs` | Fuzzy-match a pasted interview-invite email against `data/applications.md` |
 | `npm run application:init` | `application-artifacts.mjs` | Initialize one versioned application-scoped JD/CV/PDF artifact bundle |
 | `npm run paste-reply` | `paste-reply.mjs` | Manual/no-Gmail input into the `reply-watch.mjs` classification pipeline |
 | `npm run closing-soon` | `closing-soon.mjs` | List tracker rows whose Notes (or matching `jds/` capture) carry a closing date within N days, plus separate `overdue` and `unparsed` groups (read-only) |
-| `npm run close-stale` | `close-stale.mjs` | Close long-silent `Applied` rows in bulk (dry run by default; `--confirm` writes through the locked tracker path, tags the note and logs each transition) |
 | `npm run reeval-candidates` | `reeval-candidates.mjs` | List `Evaluated` tracker rows whose last evaluation predates the latest change to `cv.md`, `article-digest.md`, `config/profile.yml` or `modes/_profile.md` (read-only) |
 | `npm run freshness` | `check-table-freshness.mjs` | Staleness validator for jurisdiction data tables (`as_of` / `next_effective` watchdog) |
 | `npm run jd-archive` | `check-jd-archive.mjs` | Validate every `reports/*.md` has an archived JD (embedded section or `jds/` capture) — flags `missing-jd-archive` |
@@ -444,13 +442,13 @@ node funnel-velocity.mjs --self-test
 node funnel-velocity.mjs --benchmarks path/to/benchmarks.yml
 ```
 
-Ledger line format (TSV, appended by `set-status.mjs`, for a status a kept duplicate takes over, `dedup-tracker.mjs`, and for a bulk close of silent rows, `close-stale.mjs`; `#`-prefixed lines are comments):
+Ledger line format (TSV, appended by `set-status.mjs` and, for a status a kept duplicate takes over, `dedup-tracker.mjs`; `#`-prefixed lines are comments):
 
 ```text
 {tracker#}\t{YYYY-MM-DD}\t{from}\t{to}\t{source}\t{note}
 ```
 
-`from` may be `-` (unknown prior state); `to` = `-` retracts the row's latest observation; a later `correction`-source line with the same (tracker#, to) replaces the earlier observation's date. Sources are the closed set `VALID_SOURCES` in `funnel-velocity.mjs`. `backfill`, `manual`, `dedup-tracker` and `close-stale` are counted but kept out of day-math, because they record a transition found after the fact rather than observed when it happened.
+`from` may be `-` (unknown prior state); `to` = `-` retracts the row's latest observation; a later `correction`-source line with the same (tracker#, to) replaces the earlier observation's date. Sources are the closed set `VALID_SOURCES` in `funnel-velocity.mjs`. `backfill`, `manual` and `dedup-tracker` are counted but kept out of day-math, because they record a transition found after the fact rather than observed when it happened.
 
 **Exit codes:** `0` always (missing tracker/ledger produce an explanatory empty result), `1` self-test or benchmarks-load failure.
 
@@ -729,46 +727,9 @@ node closing-soon.mjs --summary                # human-readable table
 node closing-soon.mjs --within 14 --status Evaluated,Applied
 node closing-soon.mjs --today 2026-10-17       # deterministic runs/tests
 node closing-soon.mjs --tracker path/to/applications.md --jds path/to/jds
-node closing-soon.mjs --clashes --clash-min 3  # warn when closings pile up on an interview day
 ```
-
-**Interview-day clashes (opt-in):** `--clashes` reads `data/active-interviews.md` (the leading `YYYY-MM-DD` of the Date/Time cell; rows whose Status is Rejected, Declined, Ghosted or Done are skipped, emoji prefixes tolerated; unreadable dates are skipped silently). For each interview date inside the `--within` window it counts the closing-soon rows closing on that day or the day before; at `--clash-min` (default 2) or more it adds a `clashes` group `[{date, interview, closing}]` and a one-line hint in `--summary`. `--interviews <path>` overrides the file. Without `--clashes` the output is unchanged.
 
 **Exit codes:** `0` on a report (a missing tracker yields an empty result with a warning), `1` unrecognized flag, `2` invalid `--today` / `--within` / `--status` value.
-
----
-
-## close-stale
-
-Closes long-silent `Applied` rows in bulk. `set-status.mjs` and `outcome.mjs <selector> no_response` act on one row at a time, so a long search ends up with hundreds of rows that still read as "in flight" to the funnel, the follow-up cadence and the dashboard. This applies the existing `no_response` -> `Discarded` convention (`modes/outcome.md`) to every row that has gone quiet. Zero-LLM, no network, no schema change.
-
-**Dry run by default**: nothing is written without `--confirm`.
-
-A row is a candidate when its status resolves to `Applied` (aliases such as `Sent` count) and it is **older than** `--days` (default 60; a row exactly N days old is kept). Age runs from the latest of the Date column, an `Applied YYYY-MM-DD` date in Notes and the day `status-log.tsv` recorded the move to Applied. A candidate is **skipped**, with its reason reported, when something later suggests an answer may still come:
-
-| Reason | Meaning |
-|--------|---------|
-| `active-interview` | the company has an entry in `data/active-interviews.md` (company match only, so a role-title mismatch never closes an application you are interviewing for) |
-| `status-log` | `data/status-log.tsv` holds a transition after Applied |
-| `open-follow-up` | `data/follow-ups.md` has a follow-up logged for this row within the last `--days` days, or an uncleared `next #N` pin dated today or later (the pin `followup-seed.mjs` writes at apply time is long past on a stale row and does not count) |
-| `previously-auto-closed` | the note tag or a `close-stale` ledger line is already present: a row you reopened stays open |
-| `duplicate-num` | two rows share the tracker # (#1704), so the ledger cannot say which one a transition belongs to |
-
-Every other state (Evaluated, Responded, Assessment, Interview, Offer, Hired, Rejected, Discarded, SKIP) is never touched.
-
-`--confirm` rewrites the candidates inside one tracker transaction (the lock and atomic replace `dedup-tracker.mjs` uses): Status becomes `--status` (default `Discarded`; any canonical state except `Applied`, aliases accepted), the fixed tag `no response (auto-closed YYYY-MM-DD, Nd)` is appended to Notes so these rows can be told apart from real rejections and found again if a reply arrives, and one `source=close-stale` line per row is appended to `data/status-log.tsv`. To reopen a row that did get a reply, use `set-status.mjs`. Re-running changes nothing.
-
-```bash
-node close-stale.mjs                       # dry run, JSON (metadata, candidates, skipped)
-node close-stale.mjs --summary             # dry run, counts + a sample
-node close-stale.mjs --days 45 --status Discarded
-node close-stale.mjs --confirm             # write
-node close-stale.mjs --today 2026-10-17    # deterministic runs/tests
-```
-
-Paths follow `CAREER_OPS_ROOT` / `CAREER_OPS_DATA_DIR` / `CAREER_OPS_TRACKER`. Dates are compared as `YYYY-MM-DD` strings at UTC midnight, so the result does not depend on the host timezone.
-
-**Exit codes:** `0` on a report, `1` unrecognized flag, `2` invalid `--days` / `--today` / `--status` value or a tracker with no Notes column, `4` tracker lock timeout (nothing written).
 
 ---
 
@@ -1213,25 +1174,6 @@ node ics-interview.mjs < invite.ics
 - `--match` hands the invite text (or a file holding it) to `invite-match.mjs` to suggest the tracker row; Company and Role are filled in only when exactly one candidate matches the company exactly. The length shown comes from the `.ics`.
 - Hand-written parser for the handful of properties needed; zero-LLM, no dependency.
 
-## panelist-roles
-
-Reads who is on an interview panel from the invite itself (#5797) and tags each person's role, so the prep can change with the audience: a privacy officer probes confidentiality, a hiring manager delivery, a recruiter fit and logistics, a technical peer depth. `invite-match.mjs` reads the company, date and requisition and `ics-interview.mjs` reads the calendar file; neither looked at the people.
-
-```
-node panelist-roles.mjs invite.txt [--summary] [--table config/panelist-roles.yml]
-node panelist-roles.mjs invite.ics --summary
-node panelist-roles.mjs < invite.txt
-```
-
-- Input is the pasted invite text, a file holding it, or an `.ics` (first `VEVENT`: `SUMMARY`, `DESCRIPTION`, organizer and attendee display names). Extracted from that text only: `Name - Title` (hyphen, dash or pipe), `Name, Title` (only when the title carries a known title word), `meeting with Name` lead-ins (name with no title), and a sign-off block (name and title, or a title alone). Duplicates are merged, preferring the entry that has a title.
-- Each title is matched against `templates/panelist-roles.yml`. The first role (in file order) with a keyword hit is the `role`; any later role that also hits is listed under `alsoMatches` (so "Director, ... and Privacy Officer" is `privacy-compliance` with `hiring-manager` as a second reading). No hit is `unknown`. The table is data: the default is system layer and replaced on update, so to change keywords or the `focus` line copy it to a path of your own and pass `--table`.
-- Output (JSON, or `--summary` with one line per panelist): `panelists` (`name`, `title`, `role`, `alsoMatches`, `source`, `prepFocus`), a `roles` roll-up with one prep-focus line per role, and `warnings`. `modes/interview/plan.md` reads this when it builds a per-panelist plan.
-- Zero-LLM, offline, no dependency beyond the YAML loader. No network and no LinkedIn or other profile lookup. It writes nothing, including the tracker. Panelist names are third-party personal data: they appear in the output only and are never stored by the script.
-- Extracted text is data. Names and titles are echoed with control characters stripped and length capped, and classified by keyword; an instruction-like line in an invite is never followed.
-- Heuristic, not exhaustive: a lead-in such as "meeting with Example Co" can read a company as a name (role `unknown`), and signature or organizer entries are the sender, who may not be on the panel (a warning says so). Check the list against the invite.
-
-**Exit codes:** `0` on a report (including no panelists found), `1` unreadable input or unrecognized flag, `2` invalid `--table`.
-
 ## paste-reply
 
 Manual, no-Gmail input path into `reply-watch.mjs`'s classification pipeline (#1802). `reply-watch.mjs` already classifies employer replies and matches them to tracker rows, but its only input is `data/reply-candidates.json`, and the only planned way to populate that file is a Gmail scanner (#1583, unbuilt, requires OAuth inbox-read access). `paste-reply.mjs` normalizes a pasted (or file-provided) email's subject/from/body into the exact candidate shape `reply-watch.mjs` expects and appends it — existing candidates are never overwritten, including when several runs overlap (the append is serialized by the shared `pipeline-lock.mjs` lock, #4920). It does not classify the reply itself (that stays `reply-watch.mjs`'s job) and never runs `reply-watch.mjs` or touches `data/applications.md`.
@@ -1674,10 +1616,6 @@ A bare number or company name is convenient, but becomes ambiguous when multiple
 - `--on <date>`: Specifies an explicit transition date (YYYY-MM-DD) for status logs and notes.
 - `--json`: Formats command output as structured JSON.
 - `--expect-row <hash>` / `--expect-status <state>`: For a caller that showed the row to a person before writing (`reply-watch.mjs`). Under the lock, refuse the write if any cell but Status differs from the reviewed row (`trackerRowIdentity` in `tracker-parse.mjs`), or if the status is no longer the reviewed one and not already `<state>`. Unlike `--expect-tracker`, a write to another row does not trip them.
-
-### Undo a status change
-
-`--undo` takes the place of `<state>`. It reads the row's last surviving change from `status-log.tsv`, writes that change's prior status back to the tracker, and appends a retraction line (`to` = `-`). Every ledger reader then drops the change, so a mis-clicked Applied leaves no trace in the funnel, and none in `tracker.mjs history` once its next sync rebuilds history from the ledger. Run it again to step back one more change. It refuses, and writes nothing, when the row has no logged change (`nothing-to-undo`, exit 2), when the tracker no longer shows the status of that change because someone edited it since (`undo-stale`, exit 3), or when the change has no known prior status (`undo-unknown-prior`, exit 1). If the retraction line cannot be written, it puts the old status back and fails (`undo-not-logged`, exit 1). It does not seed a follow-up or start a JD archive.
 
 `--row` and `--report` are mutually exclusive. Because an explicit selector answers the report-mismatch guard rather than overriding it, `--row` bypasses that guard without needing `--force` (which silences the check while the ambiguity is still real).
 

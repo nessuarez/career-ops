@@ -64,7 +64,6 @@ const PATHS = {
   cv:        join(DATA_ROOT, 'cv.md'),
   profileYml: getProfilePath(),
   profile:    join(DATA_ROOT, 'modes', '_profile.md'),
-  custom:     join(DATA_ROOT, 'modes', '_custom.md'),
   reports:    join(DATA_ROOT, 'reports'),
   // CAREER_OPS_ADDITIONS mirrors merge-tracker.mjs:43. Writing under DATA_ROOT
   // regardless would drop the addition somewhere the merge it instructs never
@@ -253,8 +252,6 @@ const ofertaLogic   = readFile(PATHS.oferta,     'modes/oferta.md');
 const cvContent     = readFile(PATHS.cv,         'cv.md');
 const profileYml    = readFile(PATHS.profileYml, 'config/profile.yml');
 const profileContent = readFile(PATHS.profile,   'modes/_profile.md');
-// _custom.md is optional: an absent file is a valid end state, so no warning.
-const customContent = existsSync(PATHS.custom) ? readFileSync(PATHS.custom, 'utf-8').trim() : '';
 const languageInstruction = outputLanguageInstruction(parseOutputLanguage(profileYml));
 
 // ---------------------------------------------------------------------------
@@ -266,7 +263,6 @@ const { contextBody, budgetReport } = buildBudgetedPrompt({
   cvContent,
   profileYml,
   profileContent,
-  customContent,
   jdText,
   noCompress,
   modelName,

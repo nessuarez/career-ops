@@ -82,11 +82,8 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // `dedup-tracker` is the opposite class: the kept row of a duplicate pair takes
 // over the removed row's more advanced status, and that transition was found
 // at dedup time, not observed then (#5536).
-// `close-stale` is the same class: close-stale.mjs moves a long-silent Applied
-// row to Discarded in bulk, dated the day it ran. That is when the silence was
-// declared, not when anything happened, so it must not read as a hop (#5794).
-const VALID_SOURCES = new Set(['set-status', 'web', 'correction', 'backfill', 'manual', 'reply-watch', 'dedup-tracker', 'close-stale']);
-// Sources whose dates are trusted for day-math. backfill/manual/dedup-tracker/close-stale
+const VALID_SOURCES = new Set(['set-status', 'web', 'correction', 'backfill', 'manual', 'reply-watch', 'dedup-tracker']);
+// Sources whose dates are trusted for day-math. backfill/manual/dedup-tracker
 // are parsed and counted but excluded: they are reconstructed after the fact,
 // not observed.
 const DAY_MATH_SOURCES = new Set(['set-status', 'web', 'correction', 'reply-watch']);

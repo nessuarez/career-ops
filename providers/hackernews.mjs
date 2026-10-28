@@ -117,7 +117,7 @@ import { ATS_HOST_PATTERNS } from '../ats-vendor.mjs';
  * Exported for unit testing.
  *
  * @param {string} text  Raw comment text (may contain HTML; tags are stripped).
- * @param {string} fallbackUrl  Used when no job link is found (fetch() passes the comment's own permalink).
+ * @param {string} threadUrl  Fallback url if no URL in comment (fetch() passes the comment's own permalink).
  * @returns {{ title: string, url: string, company: string, location: string } | null}
  *   null when the comment is empty, deleted, or carries no usable title.
  */

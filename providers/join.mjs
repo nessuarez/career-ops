@@ -231,44 +231,18 @@ export default {
       allItems.push(...items);
       reportedPageCount = pageCount;
     }
-    const fetchedPages = page - 1;
-    const truncated = fetchedPages === maxPages && reportedPageCount > maxPages && ctxCap === Infinity;
+    const truncated = pageCount === maxPages && reportedPageCount > maxPages && ctxCap === Infinity;
     if (truncated) {
       console.error(`⚠️  join: ${entry.name} truncated at max_pages=${maxPages} of ${reportedPageCount} reported pages — raise max_pages on this entry for more`);
     }
 
-    // The URL carries the job's numeric `id`, the one identifier that stays the
-    // same for the posting's whole life, so it works as the scan's dedup key.
-    // The path the site itself links to is `<idParam>` (`<number>-<title>`),
-    // whose number changes whenever the posting is republished; join.com
-    // redirects `/companies/<domain>/<id>` to the current `<idParam>` page.
-    const companySlug = (typeof company.domain === 'string' && safeEncodeURIComponent(company.domain)) || slug;
-    // postedAt is `createdAt`, the day the posting was first created. A
-    // republished posting keeps it, so a role left open for a year reads as a
-    // year old. The list payload carries each posting's full body, so the
-    // description costs no extra request. It is kept whole (no DESCRIPTION_CAP),
-    // like ashby, lever and gem: the description filters read the end of a JD
-    // too, where benefits and visa wording usually sit, and about one join
-    // posting in seven runs past the default cap. `language` is the posting
-    // text's ISO 639-1 code.
-    // A row without an integer id or a title is malformed: it is dropped and
-    // the rest of the board stands.
-    const jobs = allItems
-      .filter(j => Number.isInteger(j?.id) && typeof j.title === 'string' && j.title.trim())
-      .map(j => {
-        const postedAt = toEpochMs(j.createdAt);
-        const description = htmlToText(j.descriptionHtml, { cap: Infinity });
-        const language = typeof j.language?.iso6391 === 'string' ? j.language.iso6391.trim() : '';
-        return {
-          title: j.title.trim(),
-          url: `https://join.com/companies/${companySlug}/${j.id}`,
-          company: entry.name,
-          location: formatLocation(j),
-          ...(postedAt ? { postedAt } : {}),
-          ...(description ? { description } : {}),
-          ...(language ? { language } : {}),
-        };
-      });
+    const companySlug = state.company?.domain || slug;
+    const jobs = allItems.map(j => ({
+      title: j.title || '',
+      url: `https://join.com/companies/${companySlug}/jobs/${j.idParam}`,
+      company: entry.name,
+      location: j.city?.cityName || '',
+    }));
     // Tag a cap-truncated board (the workdayTruncated convention) so a caller can tell without reading stderr.
     if (truncated) /** @type {any} */ (jobs).joinTruncated = true;
     return jobs;

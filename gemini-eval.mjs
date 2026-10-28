@@ -92,7 +92,6 @@ const PATHS = {
   evaluate:    join(CODE_ROOT, '.claude', 'skills', 'career-ops', 'SKILL.md'),
   cv:          join(DATA_ROOT, 'cv.md'),
   profile:     join(DATA_ROOT, 'modes', '_profile.md'),
-  custom:      join(DATA_ROOT, 'modes', '_custom.md'),
   profileYml:  getProfilePath(),
   reports:     join(DATA_ROOT, 'reports'),
   tracker:     resolveTrackerPath(DATA_ROOT),

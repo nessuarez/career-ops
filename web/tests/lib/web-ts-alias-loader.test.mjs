@@ -28,14 +28,28 @@ const REPO_ROOT = path.join(WEB, "..");
 // Node reads as a URL scheme ("d:") and refuses. See the file:// URL test below.
 const LOADER = pathToFileURL(path.join(HERE, "..", "helpers", "web-ts-alias-loader.mjs")).href;
 
+const stripAnsi = (str) => (str || "").replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "");
+
 /** Run one ESM snippet in a fresh Node process. Never throws; reports the failure. */
 function run(src, flags = [], cwd = WEB) {
+  const childEnv = { ...process.env, NODE_DISABLE_COLORS: "1", NO_COLOR: "1" };
+  delete childEnv.FORCE_COLOR;
+  const inheritStrip = process.features?.typescript
+    && !flags.includes("--experimental-strip-types")
+    && !flags.includes("--no-experimental-strip-types");
+  const argv = [
+    ...(inheritStrip ? ["--experimental-strip-types"] : []),
+    ...flags,
+    "--input-type=module",
+    "-e",
+    src,
+  ];
   try {
-    return { ok: true, out: execFileSync(process.execPath, [...flags, "--input-type=module", "-e", src], {
-      cwd, encoding: "utf-8", timeout: 60000, stdio: ["ignore", "pipe", "pipe"],
-    }).trim() };
+    return { ok: true, out: stripAnsi(execFileSync(process.execPath, argv, {
+      cwd, encoding: "utf-8", timeout: 60000, stdio: ["ignore", "pipe", "pipe"], env: childEnv,
+    })).trim() };
   } catch (e) {
-    return { ok: false, out: (e.stdout || "").toString().trim(), err: (e.stderr || "").toString() };
+    return { ok: false, out: stripAnsi((e.stdout || "").toString()).trim(), err: (e.stderr || "").toString() };
   }
 }
 
@@ -49,8 +63,9 @@ function run(src, flags = [], cwd = WEB) {
 // Skip rather than raise the floor: web/'s engines governs the Next.js app, not
 // just this suite, and apply-planner-fencing.test.mjs and
 // apply-agent-interpret-fencing.test.mjs already take exactly this stance for
-// the same reason. Passing --experimental-strip-types to the child instead
-// would not rescue 22.0-22.5, where the flag does not yet exist. CI runs 24.
+// the same reason. run() forwards the flag when this process already has it.
+// That still cannot rescue 22.0-22.5, where the flag does not exist and
+// features.typescript stays false. CI runs 24.
 //
 // The gate is defined ONCE, as a function, because the positive control at the
 // bottom of this file serializes this exact source into a child process. A copy
