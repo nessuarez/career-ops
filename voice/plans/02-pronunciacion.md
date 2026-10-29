@@ -61,8 +61,18 @@ evaluación.
   - `ffmpeg`, con dispositivo distinto en cada sistema operativo;
   - grabar con el móvil, soltar el archivo en `output/voice/inbox/` y ejecutar `assess
     --audio`, que lo convierte a WAV 16 kHz con ffmpeg.
-- **macOS:** la app de terminal necesita permiso de micrófono (Ajustes del Sistema →
-  Privacidad y seguridad → Micrófono). `doctor` lo detecta si `rec` graba silencio.
+- **Windows (entorno decidido):** en Windows no existe el atajo `rec`. Se graba con
+  `sox -t waveaudio default -r 16000 -c 1 -b 16 <salida.wav> silence 1 0.1 1% 1 3.0 1% trim 0 150`.
+  - Instalación de SoX con Chocolatey (`choco install sox.portable`) o Scoop. El nombre
+    exacto del paquete hay que confirmarlo en la prueba rápida.
+  - Windows pide permiso de micrófono para aplicaciones de escritorio: Configuración →
+    Privacidad y seguridad → Micrófono.
+  - `doctor` comprueba que `sox` está en el PATH y que una grabación de 2 s no sale en
+    silencio, porque eso indica micro equivocado o permiso denegado.
+  - Si `waveaudio default` coge otro micro, `config/voice.yml` admite `record_device` con
+    el nombre del dispositivo.
+  - Plan B sin SoX: `ffmpeg -f dshow -i audio="<micro>"`, más frágil porque hay que poner
+    el nombre exacto del dispositivo.
 - **Hosts permitidos:** añadir `{region}.stt.speech.microsoft.com` a la lista del Plan 1.
 - **Privacidad:** tu voz se envía a Azure para evaluarla. Las grabaciones quedan en
   `output/voice/recordings/`, que no se sube a git. Con `keep_recordings: false` se borran
@@ -185,8 +195,7 @@ Ampliación de la regla de `modes/_custom.md` del Plan 1, con un ajuste nuevo
 
 ## 10. Decisiones pendientes
 
-- **Sistema operativo:** decide cómo se instala `sox` (brew / apt / choco) y el aviso del
-  permiso de micrófono.
+- **Decidido:** Windows (SoX con `waveaudio`, §3) y evaluación en **en-US**.
 - **Grabación:** `sox` (recomendado) o archivo grabado con el móvil.
 - **`answer_mode` por defecto:** `spoken` o `typed`.
 - **¿Guardar las grabaciones?** Por defecto no (`keep_recordings: false`).

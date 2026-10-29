@@ -1,8 +1,14 @@
 # Plan 1 — Preguntas de entrevista con voz (Azure TTS)
 
-Objetivo: durante `/career-ops interview/practice`, cada pregunta (y cada repregunta) se
-oye en voz alta con la voz, el idioma y el tono configurados. También se puede usar
-suelto, fuera de una sesión.
+Objetivo, con dos usos:
+
+1. **Preguntas:** durante `/career-ops interview/practice`, cada pregunta (y cada
+   repregunta) se oye en voz alta con la voz, el idioma y el tono configurados.
+2. **Textos preparados:** oír tus respuestas preparadas, tu pitch, la "versión mejorada"
+   del feedback o cualquier texto de `interview-prep/`, para escuchar cómo suenan y poder
+   imitarlos (shadowing). Ver §5b.
+
+Entorno decidido: **Windows** y acento **en-US**.
 
 Este plan incluye la arquitectura común. El [Plan 2](02-pronunciacion.md) (leer yo y que
 Azure me evalúe) se construye encima.
@@ -111,6 +117,36 @@ El texto entra **por archivo, no como argumento**. Las preguntas pueden venir de
 shell. El agente escribe la pregunta en `output/voice/tmp/question.txt` con su
 herramienta de archivos y llama a `say`.
 
+## 5b. Textos preparados (`read`)
+
+`say` ya lee cualquier texto, pero un texto de entrevista largo necesita más:
+
+| Comando | Hace |
+|---|---|
+| `node voice/voice.mjs read --file <ruta.md> [--section "<título>"] [--rate -15%] [--pause 2s] [--step]` | Lee un texto preparado párrafo a párrafo. |
+
+- **Limpieza de Markdown:** quita `#`, `**`, enlaces, comentarios `<!-- -->` y tablas
+  antes de sintetizar, para que no lea símbolos.
+- **`--section`:** lee solo una sección. Por ejemplo, la respuesta a "Walk me through your
+  background" dentro de `interview-prep/{empresa}-{rol}.md` o de `story-bank.md`.
+- **Troceado por párrafos:** cada párrafo es una petición y un WAV en caché. Así se evita
+  el límite de tamaño por petición de la REST de TTS y, si cambias un párrafo, solo se
+  vuelve a pagar ese.
+- **Shadowing:**
+  - `--rate` permite oírlo más despacio que en las preguntas, por ejemplo un -15 %;
+  - `--pause` deja silencio entre párrafos para repetir en voz alta;
+  - `--step` espera a Enter entre párrafos. Este modo es para usarlo tú desde la terminal:
+    el agente no puede pulsar Enter, así que desde el agente se usa `--pause`.
+- **Exportar:** `--out <ruta.wav>` guarda el texto completo en un solo archivo para
+  escucharlo en el móvil. Va a `output/voice/exports/`, que no se sube a git.
+- **Persona propia:** en `config/voice.yml`, `personas.me` es la voz con la que quieres
+  oír tus propias respuestas, por ejemplo una voz masculina neutra a ritmo de entrevista.
+- **Enlace con el Plan 2:** `drill --listen-first` reutiliza `read` para oír el modelo
+  antes de grabarte.
+
+Con el skill, basta decir "léeme mi respuesta de *why this company* de la prep de Acme"
+para que el agente localice la sección y ejecute `read`.
+
 ## 6. Detalles técnicos
 
 - **REST de TTS:** `POST https://{region}.tts.speech.microsoft.com/cognitiveservices/v1`
@@ -209,10 +245,16 @@ herramienta de archivos y llama a `say`.
 - Ninguna clave aparece en logs ni en git.
 - `node test-all.mjs` sigue pasando, porque el core no se toca.
 
-## 10. Decisiones pendientes
+## 10. Decisiones
 
-- **Sistema operativo:** decide el reproductor por defecto. Con `player: auto` no es
-  imprescindible.
-- **Acento principal:** recomiendo `en-US`, porque la evaluación de prosodia del Plan 2
-  parece existir solo en en-US (sin confirmar). Se pueden añadir otros acentos por persona.
+- **Sistema operativo: Windows.**
+  - El reproductor por defecto es PowerShell
+    `(New-Object Media.SoundPlayer '<wav>').PlaySync()`, que viene de serie y reproduce
+    WAV; por eso la salida es WAV.
+  - `voice.mjs` lo lanza con `powershell.exe -NoProfile -Command`, pasando la ruta como
+    argumento escapado, nunca interpolada desde el texto.
+  - Las rutas se construyen con `node:path`, así que funciona igual desde PowerShell o
+    Git Bash, que es la shell que usa Claude Code en Windows.
+- **Acento: en-US** para preguntas, textos y evaluación (Plan 2). Otros acentos solo como
+  persona opcional (por ejemplo `panel` en en-GB).
 - **Personas y tonos:** los del ejemplo son un punto de partida.
