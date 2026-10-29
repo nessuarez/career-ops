@@ -125,6 +125,7 @@ import { getCareerOpsRoot } from './path-resolver.mjs';
 import {
   claimStatusActivity, appendStatusTransition, statusLogPath, seedFollowupOnApplied, archiveJdOnInterview,
 } from './lib/status-hooks.mjs';
+import { parseStatusLog, replayObservations } from './funnel-velocity.mjs';
 
 // Two roots. CODE_ROOT holds templates/states.yml, which ships with the code;
 // DATA_ROOT is the user's, and getCareerOpsRoot() is the only thing that honours
@@ -693,10 +694,6 @@ if (flags.reportLink !== null && !resolveCanonicalState(oldStatus, states)) {
 if (flags.expectRow !== null && trackerRowIdentity(target) !== flags.expectRow) {
   failWith(EXIT_AMBIGUOUS, 'row-changed', `Tracker #${target.num} changed since review; review it again before retrying`);
 }
-// A status outside states.yml (a hand-typed legacy value) is compared as
-// written rather than refused, so the caller still gets "status changed" and
-// not a usage error for a row it was right to show.
-const statusKey = value => resolveCanonicalState(value, states) ?? String(value ?? '').trim();
 if (flags.expectStatus !== null && statusKey(oldStatus) !== newStatus
     && statusKey(oldStatus) !== statusKey(flags.expectStatus)) {
   failWith(EXIT_AMBIGUOUS, 'status-changed',
