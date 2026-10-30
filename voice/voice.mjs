@@ -6,10 +6,11 @@ import { loadVoiceConfig } from './lib/config.mjs';
 import { detectPlayer, play } from './lib/player.mjs';
 import { createSpeaker, resolvePersona } from './lib/speak.mjs';
 import { doctor, voicesCmd, readCmd } from './lib/commands.mjs';
+import { installSkill } from './lib/install-skill.mjs';
 import { getCareerOpsRoot } from '../path-resolver.mjs';
 
 const MAX_CHARS = 5000;
-const FUTURE = ['record', 'assess', 'drill', 'progress', 'install-skill'];
+const FUTURE = ['record', 'assess', 'drill', 'progress'];
 const COMMANDS = { doctor, voices: voicesCmd, read: readCmd };
 
 function parseArgs(argv) {
@@ -55,6 +56,10 @@ export async function main(argv, deps = {}) {
       await say(rest, deps, { stdout, stderr });
       return 0;
     }
+    if (command === 'install-skill') {
+      stdout(`${installSkill({ home: deps.home, copy: deps.copy })}\n`);
+      return 0;
+    }
     if (COMMANDS[command]) {
       const root = deps.root ?? getCareerOpsRoot();
       return await COMMANDS[command](rest, deps, { stdout, stderr, root });
@@ -63,7 +68,7 @@ export async function main(argv, deps = {}) {
       stderr(`voice: "${command}" is not implemented yet\n`);
       return 1;
     }
-    stderr(`voice: unknown command "${command ?? ''}" (available: say, ${Object.keys(COMMANDS).join(', ')}; coming: ${FUTURE.join(', ')})\n`);
+    stderr(`voice: unknown command "${command ?? ''}" (available: say, install-skill,${Object.keys(COMMANDS).join(', ')}; coming: ${FUTURE.join(', ')})\n`);
     return 1;
   } catch (e) {
     stderr(`voice: ${e.message}\n`);
