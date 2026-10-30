@@ -166,7 +166,7 @@ test('errors never contain the key', async () => {
 });
 
 test('future commands print not implemented yet and exit 1', async () => {
-  const r = await run(({ deps }) => main(['doctor'], deps).then((code) => ({ code })), null, {});
+  const r = await run(({ deps }) => main(['record'], deps).then((code) => ({ code })), null, {});
   assert.equal(r.code, 1);
   assert.match(r.err.join(''), /not implemented yet/);
 });
