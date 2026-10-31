@@ -58,7 +58,7 @@ const S = { record_device: 'default', record_silence_threshold: '1%', record_sto
 test('buildSoxArgs stops on trailing silence and caps at max, device as one argument', () => {
   assert.deepEqual(buildSoxArgs({ settings: S, out: 'a.wav', max: 150, platform: 'win32' }), [
     '-q', '-t', 'waveaudio', 'default', '-r', '16000', '-c', '1', '-b', '16', 'a.wav',
-    'trim', '0', '150', 'silence', '1', '0.1', '1%', '1', '3', '1%',
+    'trim', '0', '150', 'silence', '1', '0.3', '1%', '1', '3', '1%',
   ]);
   const dev = buildSoxArgs({ settings: { ...S, record_device: 'USB Mic; calc' }, out: 'a.wav', max: 5, platform: 'win32' });
   assert.equal(dev[3], 'USB Mic; calc');
@@ -220,6 +220,7 @@ test('record writes to output/voice/recordings by default and prints path and du
   assert.match(r.recFiles[0], /^recording-.*\.wav$/);
   assert.match(r.out, /recordings/);
   assert.match(r.out, /2\.0 s/);
+  assert.match(r.out, /^Listening: speak now/);
   assert.ok(!r.out.includes(KEY) && !r.err.includes(KEY));
   const args = r.calls[0].args;
   assert.equal(args[args.indexOf('trim') + 2], '150');

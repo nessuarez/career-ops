@@ -8,6 +8,10 @@ const DRIVERS = { win32: 'waveaudio', darwin: 'coreaudio', linux: 'alsa' };
 const INSTALL_HINT = 'install it with "winget install ChrisBagwell.SoX" and restart the shell so PATH picks it up';
 const MIC_HINT = 'check the microphone permission (Settings > Privacy & security > Microphone) and the record_device setting';
 
+// Sound needed to start recording: at 0.1 s a 0.19 s noise (likely the Enter key) started it,
+// and the silence before the speech then ended it.
+const START_SOUND_S = '0.3';
+
 // Speech starts the recording; `stop_silence_s` of quiet ends it; `max` is only a safety net
 // (a fixed cut once truncated a real reading and produced false omissions). `trim` goes before
 // `silence` so it caps the time spent listening: after `silence` it never ends if nothing is heard.
@@ -17,7 +21,7 @@ export function buildSoxArgs({ settings, out, max, platform = process.platform, 
     '-q', '-t', DRIVERS[platform] ?? 'waveaudio', settings.record_device,
     '-r', '16000', '-c', '1', '-b', '16', out,
     'trim', '0', String(max),
-    ...(untilSilence ? ['silence', '1', '0.1', th, '1', String(settings.record_stop_silence_s), th] : []),
+    ...(untilSilence ? ['silence', '1', START_SOUND_S, th, '1', String(settings.record_stop_silence_s), th] : []),
   ];
 }
 
