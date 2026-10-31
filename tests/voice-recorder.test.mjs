@@ -58,7 +58,7 @@ const S = { record_device: 'default', record_silence_threshold: '1%', record_sto
 test('buildSoxArgs stops on trailing silence and caps at max, device as one argument', () => {
   assert.deepEqual(buildSoxArgs({ settings: S, out: 'a.wav', max: 150, platform: 'win32' }), [
     '-q', '-t', 'waveaudio', 'default', '-r', '16000', '-c', '1', '-b', '16', 'a.wav',
-    'silence', '1', '0.1', '1%', '1', '3', '1%', 'trim', '0', '150',
+    'trim', '0', '150', 'silence', '1', '0.1', '1%', '1', '3', '1%',
   ]);
   const dev = buildSoxArgs({ settings: { ...S, record_device: 'USB Mic; calc' }, out: 'a.wav', max: 5, platform: 'win32' });
   assert.equal(dev[3], 'USB Mic; calc');
@@ -77,6 +77,34 @@ test('record spawns sox without a shell and reports the duration', async () => {
     assert.ok(!sp.calls[0].opts.shell);
     assert.equal(r.path, join(dir, 'a.wav'));
     assert.ok(Math.abs(r.durationS - 2.5) < 0.01);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('record rejects and deletes an empty recording as no speech when waiting for speech', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'voice-rec-'));
+  try {
+    const out = join(dir, 'a.wav');
+    const sp = fakeSpawn({ wav: makeWav(0, 0) });
+    await assert.rejects(
+      record({ settings: S, out, max: 5, spawnImpl: sp.impl, platform: 'win32' }),
+      (e) => /no speech/i.test(e.message) && /record_silence_threshold/.test(e.message),
+    );
+    assert.equal(existsSync(out), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('record deletes the partial file when sox fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'voice-rec-'));
+  try {
+    const out = join(dir, 'a.wav');
+    const sp = fakeSpawn({ code: 2, wav: null });
+    const impl = (cmd, args, opts) => { writeFileSync(out, 'partial'); return sp.impl(cmd, args, opts); };
+    await assert.rejects(record({ settings: S, out, max: 5, spawnImpl: impl, platform: 'win32' }), /exited with code 2/);
+    assert.equal(existsSync(out), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
