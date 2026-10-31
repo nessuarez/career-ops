@@ -1,8 +1,10 @@
 // doctor, voices and read commands. All side effects come through injectable deps.
-import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
-import { loadVoiceConfig } from './config.mjs';
+import { loadVoiceConfig, MAX_RECORD_S } from './config.mjs';
+import { record, wavInfo } from './recorder.mjs';
 import { listVoices, stylesForVoice } from './azure-tts.mjs';
 import { detectPlayer, play } from './player.mjs';
 import { monthUsage } from './usage.mjs';
@@ -11,6 +13,9 @@ import { cleanMarkdown, selectSection, splitParagraphs, splitSentences } from '.
 
 const MAX_REQUEST_CHARS = 3000;
 const RATE_RE = /^[+-]?\d+(\.\d+)?%$/;
+// Ambient room noise peaks around 0.02; only true digital silence (wrong mic, denied permission) is below this.
+const SILENT_PEAK = 0.001;
+const DOCTOR_RECORD_S = 2;
 
 function flags(argv, spec) {
   const o = {};
@@ -78,10 +83,30 @@ export async function doctor(argv, deps, { stdout, root }) {
     line('fail', `player: ${e.message}`);
   }
 
+  await checkMic(line, cfg.settings, deps);
+
   const month = new Date((deps.now ?? Date.now)()).toISOString().slice(0, 7);
   const used = monthUsage(root, month.replace('-', ''));
   line(used >= s.monthly_char_budget ? 'warn' : 'ok', `usage this month: ${used} of ${s.monthly_char_budget} characters`);
   return failed ? 1 : 0;
+}
+
+// sox on PATH plus a short test recording; both only warn, since TTS works without a microphone.
+async function checkMic(line, settings, deps) {
+  const platform = deps.platform ?? process.platform;
+  const recordImpl = deps.recordImpl ?? ((o) => record({ settings, out: o.out, max: o.seconds, spawnImpl: deps.spawnImpl, platform, untilSilence: false }));
+  const out = join(tmpdir(), `career-ops-voice-doctor-${process.pid}.wav`);
+  try {
+    await recordImpl({ out, seconds: DOCTOR_RECORD_S });
+    line('ok', 'sox found on PATH');
+    const { peak } = wavInfo(out);
+    if (peak < SILENT_PEAK) line('warn', `test recording is silent (peak ${peak.toFixed(4)}): wrong microphone or permission denied (Settings > Privacy & security > Microphone), or check record_device`);
+    else line('ok', `test recording captured audio (peak ${peak.toFixed(3)})`);
+  } catch (e) {
+    line('warn', e.code === 'SOX_MISSING' ? `sox: ${e.message}` : `test recording failed: ${e.message}`);
+  } finally {
+    rmSync(out, { force: true });
+  }
 }
 
 export async function voicesCmd(argv, deps, { stdout, root }) {
@@ -179,5 +204,33 @@ export async function readCmd(argv, deps, { stdout, stderr, root }) {
     writeFileSync(outFile, concatWavs(wavs.map((w) => readFileSync(w))));
     stdout(`${outFile}\n`);
   }
+  return 0;
+}
+
+// --- record ---
+
+function recordingPath(root, out, now) {
+  const dir = resolve(root, 'output', 'voice', 'recordings');
+  const name = out ?? `recording-${new Date(now).toISOString().replace(/[:.]/g, '-')}.wav`;
+  const target = isAbsolute(name) ? resolve(name) : resolve(dir, name);
+  if (!isAbsolute(name)) {
+    const rel = relative(dir, target);
+    if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`--out must stay inside ${dir} (or be an absolute path)`);
+  }
+  if (!target.toLowerCase().endsWith('.wav')) throw new Error('--out must end in .wav');
+  return target;
+}
+
+export async function recordCmd(argv, deps, { stdout, root }) {
+  const o = flags(argv, { '--out': 'value', '--max': 'value' });
+  const max = o.max !== undefined ? Number(o.max) : undefined;
+  if (max !== undefined && !(max > 0 && max <= MAX_RECORD_S)) throw new Error(`--max must be a number of seconds above 0 and up to ${MAX_RECORD_S}, got "${o.max}"`);
+  const target = recordingPath(root, o.out, (deps.now ?? Date.now)());
+  const { settings } = loadVoiceConfig({ root });
+  mkdirSync(dirname(target), { recursive: true });
+  const r = await record({ settings, out: target, max: max ?? settings.record_max_s, spawnImpl: deps.spawnImpl, platform: deps.platform ?? process.platform });
+  stdout(`${r.path}
+${r.durationS.toFixed(1)} s
+`);
   return 0;
 }

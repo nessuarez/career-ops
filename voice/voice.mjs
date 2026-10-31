@@ -5,13 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { loadVoiceConfig } from './lib/config.mjs';
 import { detectPlayer, play } from './lib/player.mjs';
 import { createSpeaker, resolvePersona } from './lib/speak.mjs';
-import { doctor, voicesCmd, readCmd } from './lib/commands.mjs';
+import { doctor, voicesCmd, readCmd, recordCmd } from './lib/commands.mjs';
 import { installSkill } from './lib/install-skill.mjs';
 import { getCareerOpsRoot } from '../path-resolver.mjs';
 
 const MAX_CHARS = 5000;
-const FUTURE = ['record', 'assess', 'drill', 'progress'];
-const COMMANDS = { doctor, voices: voicesCmd, read: readCmd };
+const FUTURE = ['assess', 'drill', 'progress'];
+const COMMANDS = { doctor, voices: voicesCmd, read: readCmd, record: recordCmd };
 
 function parseArgs(argv) {
   const o = { noPlay: false };
