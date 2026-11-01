@@ -36,19 +36,33 @@ const TRACKING_PARAMS = [
 ];
 
 /**
- * Promote the one known identity-bearing SPA fragment before normalization
- * drops fragments. MokaHR tenant pages share one path and identify postings
- * only through `#/job/{id}`.
+ * Match the core URL key's DNS-root-label normalization: one trailing dot
+ * names the same host, but two trailing dots must not be silently repaired.
+ */
+function foldHostname(host) {
+  const h = String(host).toLowerCase();
+  return h.length > 1 && h.endsWith(".") && !h.endsWith("..") ? h.slice(0, -1) : h;
+}
+
+/**
+ * Promote a known identity-bearing SPA fragment into a functional query key
+ * before generic URL normalization drops the fragment. Most fragments are
+ * presentation-only. The narrow exceptions are recognized `#/job/{id}` and
+ * `#/jobs/{id}` routes; MokaHR keeps its established board-specific key.
  *
  * @param {URL} url
  */
 export function promoteKnownFragmentIdentity(url) {
-  if (url.hostname.toLowerCase() !== "app.mokahr.com") return;
-  const match = /^#\/job\/([^/?#]+)(?:\?[^#]*)?$/.exec(url.hash);
+  const match = /^#\/jobs?\/([^/?#]+)(?:\?[^#]*)?$/i.exec(url.hash);
   if (!match) return;
   let jobId;
   try { jobId = decodeURIComponent(match[1]); } catch { return; }
-  if (jobId) url.searchParams.set("mokahr_job_id", jobId);
+  if (!jobId) return;
+  if (url.hostname.toLowerCase() === "app.mokahr.com") {
+    url.searchParams.append("mokahr_job_id", jobId);
+    return;
+  }
+  url.searchParams.append("_career_ops_fragment_job_id", jobId);
 }
 
 /**
@@ -74,7 +88,7 @@ export function normalizeUrl(raw) {
   if (u.protocol !== "http:" && u.protocol !== "https:") return "";
 
   u.protocol = "https:";
-  u.hostname = u.hostname.toLowerCase();
+  u.hostname = foldHostname(u.hostname);
   promoteKnownFragmentIdentity(u);
   u.hash = "";
 
