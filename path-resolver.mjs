@@ -12,7 +12,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * @returns {string} Absolute path to the data root
  */
 export function getCareerOpsRoot() {
-  const env = process.env.CAREER_OPS_ROOT?.trim() || process.env.CAREER_OPS_DATA_DIR?.trim();
+  // Local fix 2026-11-01: DATA_DIR wins over ROOT. The upstream order broke
+  // cv.md resolution for VPS evals that export BOTH (eval-or.sh needs ROOT for
+  // its .env/openai-eval.mjs paths, while DATA_DIR is the actual data root —
+  // reports and cv.md landed in the tool repo instead of career-ops-personal).
+  const env = process.env.CAREER_OPS_DATA_DIR?.trim() || process.env.CAREER_OPS_ROOT?.trim();
   if (env) {
     return resolve(__dirname, env);
   }
