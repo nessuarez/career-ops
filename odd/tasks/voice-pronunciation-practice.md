@@ -33,7 +33,7 @@ Windows, en-US.
 - [x] **T1 Smoke test (manual, user-assisted):** ~20 s WAV to REST with/without reference text, prosody + IPA;
   record which fields F0 really returns (prosody, break errors, phonemes) and pricing/F0 availability.
   Save a de-identified response as test fixture. Adjust summary shape to the real fields.
-- [ ] **T2 `record`:** SoX `waveaudio` with silence detection, `record_device`, thresholds in YAML;
+- [x] **T2 `record`:** SoX `waveaudio` with silence detection, `record_device`, thresholds in YAML;
   `doctor` checks `sox` on PATH and a 2 s non-silent test recording; mic-permission message.
 - [ ] **T3 `assess` (REST, ≤30 s):** scripted vs free mode, parameters (HundredMark, Phoneme, EnableMiscue,
   prosody, IPA), summary JSON (scores, timing/WPM/long pauses, words_to_fix ≤3, prosody_flags, omitted/inserted)
@@ -87,9 +87,14 @@ Windows, en-US.
   and got 0.4 s. That WAV has flat, low levels (RMS 0.010-0.018, peak 0.032) against a 1% threshold. SoX silence logic is
   correct on files (0.3 amplitude tone kept whole; 0.005 amplitude tone gives empty output). Hypothesis, not proven: speech
   reaches SoX below the 1% threshold. Live input handling by SoX is not ruled out.
+- **T2 closed (2026-11-03).** Measured 15 s on the real mic, RMS per 50 ms: room p50 0.0001, speech p50 0.0026 (below 1%),
+  plus a stray ~0.4 s noise at 0.04 while quiet; mic open has no transient. Replaying `silence` gave 0.42 s at 1% and 0.98 s
+  at 0.3%: any noise starts it and the gap before speech ends it. Decision (user): detect speech in Node. Commit 69478e6a,
+  route delegated writer: sox streams raw PCM; threshold = max(record_silence_threshold, min(4 x calibration noise, 1%)),
+  default minimum 0.15%; stop after `record_stop_silence_s` only once 1 s of speech accumulated; trailing silence trimmed to
+  0.5 s; no speech by max deletes the file. RED: missing export; GREEN: 104/104 voice tests, `--only voice` 8/8 (parent re-ran
+  104/104). Real checks: 5 s quiet run reported no speech and left no file; user speech run recorded 16.1 s.
 
 ## Next step
-On the machine with the microphone, record 15 s with no silence effect (quiet 0-3 s, speech 3-12 s, quiet 12-15 s), compare
-RMS per 50 ms window for speech vs quiet, and replay `silence 1 0.3 <th> 1 3 <th>` at 1%, 0.5%, 0.3%, 0.2% and 0.1%. Choose the
-threshold from that data, or investigate live input if speech is loud. Then close T2 and go to T3. The fixtures in
-`tests/fixtures/voice/` are committed for T3.
+T3 `assess` (REST, ≤30 s), using the committed fixtures in `tests/fixtures/voice/`. Delivery strategy question (running
+count over ~400 lines) is still unasked.
