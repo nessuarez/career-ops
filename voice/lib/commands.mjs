@@ -1,10 +1,11 @@
 // doctor, voices and read commands. All side effects come through injectable deps.
 import { existsSync, readFileSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, relative, isAbsolute, dirname } from 'node:path';
+import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path';
 import { createInterface } from 'node:readline';
 import { loadVoiceConfig, MAX_RECORD_S } from './config.mjs';
 import { record, wavInfo } from './recorder.mjs';
+import { assessAudio, summarizeAssessment, MAX_REST_S } from './assess.mjs';
 import { listVoices, stylesForVoice } from './azure-tts.mjs';
 import { detectPlayer, play } from './player.mjs';
 import { monthUsage } from './usage.mjs';
@@ -233,5 +234,45 @@ export async function recordCmd(argv, deps, { stdout, root }) {
   stdout(`${r.path}
 ${r.durationS.toFixed(1)} s
 `);
+  return 0;
+}
+
+// --- assess ---
+
+const slug = (name) => name.replace(/\.[^.]*$/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'audio';
+
+export async function assessCmd(argv, deps, { stdout, stderr, root }) {
+  const o = flags(argv, { '--audio': 'value', '--reference-file': 'value', '--locale': 'value' });
+  if (!o.audio) throw new Error('assess needs --audio <wav>');
+  if (!existsSync(o.audio)) throw new Error(`audio file not found: ${o.audio}`);
+  let reference;
+  if (o.referenceFile !== undefined) {
+    if (!existsSync(o.referenceFile)) throw new Error(`reference file not found: ${o.referenceFile}`);
+    reference = readFileSync(o.referenceFile, 'utf8').trim();
+    if (!reference) throw new Error('reference file is empty');
+  }
+  const { durationS } = wavInfo(o.audio);
+  if (durationS > MAX_REST_S) {
+    throw new Error(`audio is ${durationS.toFixed(1)} s; assess over REST accepts up to ${MAX_REST_S} s. Longer audio needs the continuous SDK path (not implemented yet); record or split into answers under ${MAX_REST_S} s`);
+  }
+
+  const cfg = loadVoiceConfig({ root });
+  const s = cfg.settings;
+  const locale = o.locale ?? s.locale;
+  const mode = reference ? 'scripted' : 'free';
+  stderr('voice: your recording is sent to Azure Speech for assessment.\n');
+  const raw = await assessAudio({ wav: readFileSync(o.audio), reference, locale, region: cfg.azure.region, key: cfg.azure.key, fetchImpl: deps.fetchImpl ?? fetch });
+  const summary = summarizeAssessment(raw, {
+    mode,
+    locale,
+    thresholds: { accuracyMin: s.assess_accuracy_min, prosodyMin: s.assess_prosody_min, wpmMin: s.assess_wpm_min, wpmMax: s.assess_wpm_max, longPauseS: s.assess_long_pause_s, maxWords: s.assess_max_words },
+  });
+
+  const dir = resolve(root, 'output', 'voice', 'assessments');
+  mkdirSync(dir, { recursive: true });
+  const date = new Date((deps.now ?? Date.now)()).toISOString().slice(0, 10);
+  const file = join(dir, `${date}-${slug(basename(o.audio))}.json`);
+  writeFileSync(file, `${JSON.stringify(summary, null, 2)}\n`);
+  stdout(`${file}\n`);
   return 0;
 }

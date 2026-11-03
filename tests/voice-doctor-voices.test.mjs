@@ -111,8 +111,8 @@ test('voices needs --locale and never leaks the key on errors', async () => {
   assert.match(c.err, /xx-XX/);
 });
 
-test('assess, drill and progress stay not implemented', async () => {
-  for (const c of ['assess', 'drill', 'progress']) {
+test('drill and progress stay not implemented', async () => {
+  for (const c of ['drill', 'progress']) {
     const r = await run([c]);
     assert.equal(r.code, 1);
     assert.match(r.err, /not implemented yet/);

@@ -95,6 +95,21 @@ Windows, en-US.
   0.5 s; no speech by max deletes the file. RED: missing export; GREEN: 104/104 voice tests, `--only voice` 8/8 (parent re-ran
   104/104). Real checks: 5 s quiet run reported no speech and left no file; user speech run recorded 16.1 s.
 
+- **Delivery strategy (2026-11-03, user): `stacked-to-main`.** main...HEAD is 25 files, +2904 (includes the stacked TTS base).
+  Slices: (1) TTS base aee60147..6cd5883e, (2) T2 record 32df8f7b..464f07e9 + fixtures, (3) T3+ in PRs of ~400 authored lines
+  each. Each PR targets the previous one, then main. No push without asking. Engram mirror `odd/voice-pronunciation-practice/tasks`:
+  not found at T3 start (search empty); mirror pending.
+- **T3 route (2026-11-03):** delegated writer (2+ non-trivial files: `voice/lib/assess.mjs`, `voice.mjs` wiring, config keys, tests).
+  Tests live in `tests/voice-*.test.mjs` (not `voice/test/`); runner `node --test tests/voice-*.test.mjs`.
+
+- **T3 (2026-11-04), delegated writer.** RED: ERR_MODULE_NOT_FOUND for voice/lib/assess.mjs (later two old stub tests
+  failed as expected and were updated). GREEN: 123/123 voice tests (parent re-ran),  9/9 reported.
+  ~470 authored lines (tests 271, code ~200), over the ~400 heuristic; not trimmed. Fixture-derived rules enforced by tests
+  (flat NBest scores, 100 ns ticks, no per-word Monotone, pauses from timing gaps, omissions excluded from words_to_fix).
+  New config keys assess_{accuracy_min,prosody_min,wpm_min,wpm_max,long_pause_s,max_words}. **Open:** live REST call not run
+  (request shape, Content-Type sample rate, format=detailed unverified against Azure), so T3 stays unchecked until one real
+  smoke run; pace/pause rules are interpretation, not checked on real audio. Risk tier not assessed (RDD off); no verifier run.
+
 ## Next step
 T3 `assess` (REST, ≤30 s), using the committed fixtures in `tests/fixtures/voice/`. Delivery strategy question (running
 count over ~400 lines) is still unasked.

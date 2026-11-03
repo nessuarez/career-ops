@@ -21,6 +21,12 @@ export const DEFAULTS = Object.freeze({
   record_silence_threshold: '0.15%', // minimum speech level; the real threshold is calibrated on the room noise
   record_stop_silence_s: 3.0,
   record_max_s: 150,
+  assess_accuracy_min: 60, // a word below this accuracy is a candidate to fix
+  assess_prosody_min: 70, // prosody score below this is flagged
+  assess_wpm_min: 120, // pace outside min-max words per minute is flagged
+  assess_wpm_max: 160,
+  assess_long_pause_s: 1.0, // a gap between words at least this long is reported
+  assess_max_words: 3, // words to fix per answer, so the feedback stays usable
   personas: {},
 });
 
@@ -32,10 +38,10 @@ const REGION_RE = /^[a-z0-9]+$/;
 const THRESHOLD_RE = /^\d+(\.\d+)?%$/;
 export const MAX_RECORD_S = 600;
 
-// Hosts the module may talk to; later features add the speech-to-text host here.
+// Hosts the module may talk to: text-to-speech and (pronunciation assessment) speech-to-text.
 export function isAllowedHost(host, region) {
   if (typeof host !== 'string' || !REGION_RE.test(String(region))) return false;
-  return host === `${region}.tts.speech.microsoft.com`;
+  return host === `${region}.tts.speech.microsoft.com` || host === `${region}.stt.speech.microsoft.com`;
 }
 
 // Minimal KEY=VALUE parser; does not touch process.env.
@@ -79,6 +85,14 @@ function validate(s, where, partial) {
   check('record_silence_threshold', (v) => typeof v === 'string' && THRESHOLD_RE.test(v) && parseFloat(v) <= 100, 'a percentage from 0% to 100% like "1%"');
   check('record_stop_silence_s', (v) => typeof v === 'number' && v > 0 && v <= 30, 'a number of seconds above 0 and up to 30');
   check('record_max_s', (v) => typeof v === 'number' && v > 0 && v <= MAX_RECORD_S, `a number of seconds above 0 and up to ${MAX_RECORD_S}`);
+  const score = (v) => typeof v === 'number' && v >= 0 && v <= 100;
+  check('assess_accuracy_min', score, 'a number from 0 to 100');
+  check('assess_prosody_min', score, 'a number from 0 to 100');
+  check('assess_wpm_min', (v) => typeof v === 'number' && v > 0, 'a positive number');
+  check('assess_wpm_max', (v) => typeof v === 'number' && v > 0, 'a positive number');
+  if (has('assess_wpm_min') && has('assess_wpm_max') && s.assess_wpm_min > s.assess_wpm_max) fail(`${where}assess_wpm_min must not exceed assess_wpm_max`);
+  check('assess_long_pause_s', (v) => typeof v === 'number' && v > 0, 'a positive number of seconds');
+  check('assess_max_words', (v) => Number.isInteger(v) && v > 0, 'a positive integer');
 }
 
 export function loadVoiceConfig({ root } = {}) {

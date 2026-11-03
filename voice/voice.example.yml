@@ -19,6 +19,14 @@ voice:
   record_stop_silence_s: 3.0     # seconds of silence that end the recording
   record_max_s: 150              # hard cut, only a safety net; --max overrides it
 
+  # Pronunciation assessment (assess): thresholds for what gets reported.
+  assess_accuracy_min: 60        # a word below this accuracy (0-100) is a candidate to fix
+  assess_prosody_min: 70         # prosody score below this is flagged
+  assess_wpm_min: 120            # pace outside min-max words per minute is flagged
+  assess_wpm_max: 160
+  assess_long_pause_s: 1.0       # a gap between two words at least this long is reported
+  assess_max_words: 3            # words to fix per answer
+
   # Interviewer persona overlays; any base setting above can be overridden.
   personas:
     recruiter:      { voice: en-US-JennyNeural, style: friendly, rate: "0%" }
