@@ -35,7 +35,7 @@ Windows, en-US.
   Save a de-identified response as test fixture. Adjust summary shape to the real fields.
 - [x] **T2 `record`:** SoX `waveaudio` with silence detection, `record_device`, thresholds in YAML;
   `doctor` checks `sox` on PATH and a 2 s non-silent test recording; mic-permission message.
-- [ ] **T3 `assess` (REST, ≤30 s):** scripted vs free mode, parameters (HundredMark, Phoneme, EnableMiscue,
+- [x] **T3 `assess` (REST, ≤30 s):** scripted vs free mode, parameters (HundredMark, Phoneme, EnableMiscue,
   prosody, IPA), summary JSON (scores, timing/WPM/long pauses, words_to_fix ≤3, prosody_flags, omitted/inserted)
   + fixture-based tests.
 - [ ] **T4 `assess` continuous (SDK, >30 s):** same summary from a WAV 16 kHz mono; auto-select REST vs SDK;
@@ -110,6 +110,7 @@ Windows, en-US.
   (request shape, Content-Type sample rate, format=detailed unverified against Azure), so T3 stays unchecked until one real
   smoke run; pace/pause rules are interpretation, not checked on real audio. Risk tier not assessed (RDD off); no verifier run.
 
+- **T3 live run (2026-11-04), closed.** Free mode on a 16.1 s recording (user-authorized, sent to Azure): REST accepted the request, JSON written to the data root. Pron 74.2, accuracy 86, fluency 76, prosody 69.6; 2 words to fix with IPA; one 1.9 s pause; 78 WPM (flagged slow). Request shape, Content-Type and format=detailed are now verified. Note: timing.duration_s (11.6) is the spoken span, not the file length. Scripted mode not run live.
+
 ## Next step
-T3 `assess` (REST, ≤30 s), using the committed fixtures in `tests/fixtures/voice/`. Delivery strategy question (running
-count over ~400 lines) is still unasked.
+T4 `assess` continuous (SDK, >30 s). Stacked-to-main PR slicing agreed; no push yet. Engram mirror still pending.
