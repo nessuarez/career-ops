@@ -15,7 +15,7 @@ voice:
 
   # Recording (SoX): starts when you speak, stops after trailing silence.
   record_device: default         # waveaudio device name; "default" = Windows default microphone
-  record_silence_threshold: 1%   # level counted as silence; raise it in a noisy room
+  record_silence_threshold: 0.15%  # MINIMUM level counted as speech; the real threshold is calibrated on the room noise (up to 1%)
   record_stop_silence_s: 3.0     # seconds of silence that end the recording
   record_max_s: 150              # hard cut, only a safety net; --max overrides it
 

@@ -228,7 +228,7 @@ export async function recordCmd(argv, deps, { stdout, root }) {
   const target = recordingPath(root, o.out, (deps.now ?? Date.now)());
   const { settings } = loadVoiceConfig({ root });
   mkdirSync(dirname(target), { recursive: true });
-  stdout(`Listening: speak now. Recording stops after ${settings.record_stop_silence_s} s of silence.\n`);
+  stdout(`Listening: speak now. Recording stops after ${settings.record_stop_silence_s} s of silence once you have spoken.\n`);
   const r = await record({ settings, out: target, max: max ?? settings.record_max_s, spawnImpl: deps.spawnImpl, platform: deps.platform ?? process.platform });
   stdout(`${r.path}
 ${r.durationS.toFixed(1)} s

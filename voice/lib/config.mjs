@@ -18,7 +18,7 @@ export const DEFAULTS = Object.freeze({
   cache: true,
   monthly_char_budget: 450000,
   record_device: 'default',
-  record_silence_threshold: '1%',
+  record_silence_threshold: '0.15%', // minimum speech level; the real threshold is calibrated on the room noise
   record_stop_silence_s: 3.0,
   record_max_s: 150,
   personas: {},

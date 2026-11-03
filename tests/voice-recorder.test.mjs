@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../voice/voice.mjs';
-import { buildSoxArgs, record, wavInfo } from '../voice/lib/recorder.mjs';
+import { buildSoxArgs, createSpeechDetector, record, wavInfo } from '../voice/lib/recorder.mjs';
 import { loadVoiceConfig } from '../voice/lib/config.mjs';
 
 const KEY = 'fake-key-0123456789abcdef';
@@ -34,62 +34,186 @@ function makeWav(seconds, amp, rate = 16000) {
   return Buffer.concat([h, pcm]);
 }
 
-// Fake spawn: "sox" writes `wav` to the .wav argument, then exits with `code` (or errors with `error`).
-function fakeSpawn({ wav = makeWav(2, 0.1), code = 0, error, stderr = '' } = {}) {
+// Raw 16-bit mono PCM; `amp` (0..1) is the constant sample amplitude, so the RMS equals `amp`.
+function pcm(seconds, amp, rate = 16000) {
+  const n = Math.round(seconds * rate);
+  const b = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(amp * 32767) * (i % 2 ? -1 : 1), i * 2);
+  return b;
+}
+const cat = (...parts) => Buffer.concat(parts);
+const samples = (buf) => new Int16Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
+const split = (buf, size) => {
+  const out = [];
+  for (let i = 0; i < buf.length; i += size) out.push(buf.subarray(i, i + size));
+  return out;
+};
+
+const NOISE = 0.0003; // quiet room
+const SPEECH = 0.02;
+const QUIET_VOICE = 0.0026;
+
+// Fake spawn: "sox" emits `audio` (a Buffer) on stdout in chunks, then exits with `code` (or errors
+// with `error`). kill() stops the emission and closes with a null code, like a killed process.
+function fakeSpawn({ audio = cat(pcm(0.5, NOISE), pcm(1.5, SPEECH)), chunk = 4096, code = 0, error, stderr = '' } = {}) {
   const calls = [];
   const impl = (cmd, args, opts) => {
-    calls.push({ cmd, args, opts });
+    const call = { cmd, args, opts, killed: false };
+    calls.push(call);
     const child = new EventEmitter();
+    child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
+    child.kill = () => { call.killed = true; return true; };
     setImmediate(() => {
       if (error) return child.emit('error', Object.assign(new Error(error), { code: error }));
       if (stderr) child.stderr.emit('data', Buffer.from(stderr));
-      const out = args.find((a) => a.endsWith('.wav'));
-      if (code === 0 && wav) writeFileSync(out, wav);
-      child.emit('close', code);
+      for (const c of split(audio, chunk)) {
+        if (call.killed) break;
+        child.stdout.emit('data', c);
+      }
+      child.emit('close', call.killed ? null : code);
     });
     return child;
   };
   return { impl, calls };
 }
 
-const S = { record_device: 'default', record_silence_threshold: '1%', record_stop_silence_s: 3, record_max_s: 150 };
+const S = { record_device: 'default', record_silence_threshold: '0.15%', record_stop_silence_s: 3, record_max_s: 150 };
 
-test('buildSoxArgs stops on trailing silence and caps at max, device as one argument', () => {
-  assert.deepEqual(buildSoxArgs({ settings: S, out: 'a.wav', max: 150, platform: 'win32' }), [
-    '-q', '-t', 'waveaudio', 'default', '-r', '16000', '-c', '1', '-b', '16', 'a.wav',
-    'trim', '0', '150', 'silence', '1', '0.3', '1%', '1', '3', '1%',
+const tmp = () => mkdtempSync(join(tmpdir(), 'voice-rec-'));
+
+test('buildSoxArgs streams raw PCM to stdout, caps at max, device as one argument', () => {
+  assert.deepEqual(buildSoxArgs({ settings: S, max: 150, platform: 'win32' }), [
+    '-q', '-t', 'waveaudio', 'default', '-r', '16000', '-c', '1', '-b', '16', '-e', 'signed-integer',
+    '-t', 'raw', '-', 'trim', '0', '150',
   ]);
-  const dev = buildSoxArgs({ settings: { ...S, record_device: 'USB Mic; calc' }, out: 'a.wav', max: 5, platform: 'win32' });
+  const dev = buildSoxArgs({ settings: { ...S, record_device: 'USB Mic; calc' }, max: 5, platform: 'win32' });
   assert.equal(dev[3], 'USB Mic; calc');
-  const fixed = buildSoxArgs({ settings: S, out: 'a.wav', max: 2, platform: 'win32', untilSilence: false });
-  assert.deepEqual(fixed.slice(-3), ['trim', '0', '2']);
-  assert.ok(!fixed.includes('silence'));
+  assert.ok(!buildSoxArgs({ settings: S, max: 2, platform: 'win32' }).includes('silence'));
 });
 
-test('record spawns sox without a shell and reports the duration', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'voice-rec-'));
+// --- speech detector (pure) ---
+
+const feed = (det, buf, chunk = 800) => {
+  let stop = false;
+  for (const c of split(buf, chunk * 2)) stop = det.push(samples(c)) || stop;
+  return stop;
+};
+const detector = (o = {}) => createSpeechDetector({ minThreshold: 0.0015, stopSilenceS: 3, ...o });
+
+test('detector: a stray noise followed by a long silence does not end the recording', () => {
+  const det = detector();
+  assert.equal(feed(det, cat(pcm(0.5, NOISE), pcm(0.4, 0.04), pcm(3.5, NOISE))), false);
+  assert.equal(feed(det, pcm(2, SPEECH)), false);
+  assert.equal(feed(det, pcm(2.9, NOISE)), false);
+  assert.equal(feed(det, pcm(0.3, NOISE)), true);
+});
+
+test('detector: silence does not stop before one second of speech was accumulated', () => {
+  const det = detector();
+  assert.equal(feed(det, cat(pcm(0.5, NOISE), pcm(0.8, SPEECH), pcm(6, NOISE))), false);
+  assert.ok(det.speechSeconds() < 1);
+});
+
+test('detector: stops after the silence run once speech reached one second, and reports the trim point', () => {
+  const det = detector();
+  feed(det, cat(pcm(0.5, NOISE), pcm(2, SPEECH)));
+  assert.equal(feed(det, pcm(3.2, NOISE)), true);
+  assert.ok(Math.abs(det.speechSeconds() - 2) < 0.06);
+  // last speech ends at 2.5 s; at most 0.5 s of silence is kept after it
+  assert.equal(det.trimSamples(), Math.round(3.0 * 16000));
+});
+
+test('detector: trim point never exceeds what was received', () => {
+  const det = detector();
+  feed(det, cat(pcm(0.5, NOISE), pcm(2, SPEECH), pcm(0.2, NOISE)));
+  assert.equal(det.trimSamples(), Math.round(2.7 * 16000));
+});
+
+test('detector: calibration raises the threshold in a noisy room, never above 1%', () => {
+  const noisy = detector();
+  feed(noisy, pcm(0.6, 0.002));
+  assert.ok(Math.abs(noisy.threshold() - 0.008) < 1e-4);
+  const loud = detector();
+  feed(loud, pcm(0.6, 0.01));
+  assert.ok(Math.abs(loud.threshold() - 0.01) < 1e-9);
+  const quiet = detector();
+  feed(quiet, pcm(0.6, 0.0001));
+  assert.ok(Math.abs(quiet.threshold() - 0.0015) < 1e-9);
+});
+
+test('detector: a minimum threshold above 1% wins over the cap', () => {
+  const det = detector({ minThreshold: 0.02 });
+  feed(det, pcm(0.6, NOISE));
+  assert.equal(det.threshold(), 0.02);
+});
+
+test('detector: a quiet voice (0.26% RMS) counts as speech in a quiet room', () => {
+  const det = detector();
+  feed(det, cat(pcm(0.5, NOISE), pcm(1.5, QUIET_VOICE)));
+  assert.ok(Math.abs(det.speechSeconds() - 1.5) < 0.06);
+  assert.equal(feed(det, pcm(3.2, NOISE)), true);
+});
+
+test('detector: handles chunks that are not a multiple of the 50 ms window', () => {
+  const det = detector();
+  assert.equal(feed(det, cat(pcm(0.5, NOISE), pcm(2, SPEECH), pcm(3.2, NOISE)), 333), true);
+  assert.ok(Math.abs(det.speechSeconds() - 2) < 0.06);
+});
+
+// --- record() with a fake sox ---
+
+test('record spawns sox without a shell, writes a valid WAV and reports the duration', async () => {
+  const dir = tmp();
   try {
-    const sp = fakeSpawn({ wav: makeWav(2.5, 0.1) });
+    const sp = fakeSpawn({ audio: cat(pcm(0.5, NOISE), pcm(2, SPEECH)) });
     const r = await record({ settings: S, out: join(dir, 'a.wav'), max: 150, spawnImpl: sp.impl, platform: 'win32' });
     assert.equal(sp.calls[0].cmd, 'sox');
     assert.ok(Array.isArray(sp.calls[0].args));
     assert.ok(!sp.calls[0].opts.shell);
     assert.equal(r.path, join(dir, 'a.wav'));
     assert.ok(Math.abs(r.durationS - 2.5) < 0.01);
+    assert.ok(Math.abs(wavInfo(join(dir, 'a.wav')).durationS - 2.5) < 0.01);
+    assert.ok(r.peak > 0.019 && r.peak < 0.021);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('record rejects and deletes an empty recording as no speech when waiting for speech', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'voice-rec-'));
+test('record: a stray noise then a long silence then speech is not cut early', async () => {
+  const dir = tmp();
+  try {
+    const audio = cat(pcm(0.5, NOISE), pcm(0.4, 0.04), pcm(3.5, NOISE), pcm(2, QUIET_VOICE), pcm(4, NOISE));
+    const sp = fakeSpawn({ audio, chunk: 3001 });
+    const r = await record({ settings: S, out: join(dir, 'a.wav'), max: 150, spawnImpl: sp.impl, platform: 'win32' });
+    // speech ends at 6.4 s; 0.5 s of trailing silence is kept
+    assert.ok(Math.abs(r.durationS - 6.9) < 0.01, String(r.durationS));
+    assert.equal(sp.calls[0].killed, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('record: stopping on silence kills sox, trims the trailing silence and is not a sox failure', async () => {
+  const dir = tmp();
+  try {
+    const sp = fakeSpawn({ audio: cat(pcm(0.5, NOISE), pcm(2, SPEECH), pcm(10, NOISE)), code: 1 });
+    const r = await record({ settings: S, out: join(dir, 'a.wav'), max: 150, spawnImpl: sp.impl, platform: 'win32' });
+    assert.equal(sp.calls[0].killed, true);
+    assert.ok(Math.abs(r.durationS - 3.0) < 0.01);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('record: reaching max without speech is rejected as no speech and deletes the file', async () => {
+  const dir = tmp();
   try {
     const out = join(dir, 'a.wav');
-    const sp = fakeSpawn({ wav: makeWav(0, 0) });
+    const sp = fakeSpawn({ audio: cat(pcm(0.5, NOISE), pcm(0.4, 0.04), pcm(4, NOISE)) });
     await assert.rejects(
       record({ settings: S, out, max: 5, spawnImpl: sp.impl, platform: 'win32' }),
-      (e) => /no speech/i.test(e.message) && /record_silence_threshold/.test(e.message),
+      (e) => /no speech/i.test(e.message) && /record_silence_threshold/.test(e.message) && /Microphone/.test(e.message),
     );
     assert.equal(existsSync(out), false);
   } finally {
@@ -97,14 +221,50 @@ test('record rejects and deletes an empty recording as no speech when waiting fo
   }
 });
 
+test('record: reaching max with at least one second of speech keeps the recording', async () => {
+  const dir = tmp();
+  try {
+    const sp = fakeSpawn({ audio: cat(pcm(0.5, NOISE), pcm(1.5, SPEECH), pcm(1, NOISE)) });
+    const r = await record({ settings: S, out: join(dir, 'a.wav'), max: 3, spawnImpl: sp.impl, platform: 'win32' });
+    assert.ok(Math.abs(r.durationS - 2.5) < 0.01); // speech ends at 2 s, 0.5 s of silence kept
+    assert.equal(sp.calls[0].killed, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('record with untilSilence false keeps the full length without detection', async () => {
+  const dir = tmp();
+  try {
+    const sp = fakeSpawn({ audio: pcm(2, 0.0001) });
+    const r = await record({ settings: S, out: join(dir, 'a.wav'), max: 2, spawnImpl: sp.impl, platform: 'win32', untilSilence: false });
+    assert.ok(Math.abs(r.durationS - 2) < 0.01);
+    assert.equal(sp.calls[0].killed, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('record deletes the partial file when sox fails', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'voice-rec-'));
+  const dir = tmp();
   try {
     const out = join(dir, 'a.wav');
-    const sp = fakeSpawn({ code: 2, wav: null });
+    const sp = fakeSpawn({ code: 2, audio: pcm(1, SPEECH) });
     const impl = (cmd, args, opts) => { writeFileSync(out, 'partial'); return sp.impl(cmd, args, opts); };
     await assert.rejects(record({ settings: S, out, max: 5, spawnImpl: impl, platform: 'win32' }), /exited with code 2/);
     assert.equal(existsSync(out), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('record keeps a pre-existing file when sox is not installed', async () => {
+  const dir = tmp();
+  try {
+    const out = join(dir, 'a.wav');
+    writeFileSync(out, 'earlier recording');
+    await assert.rejects(record({ settings: S, out, max: 5, spawnImpl: fakeSpawn({ error: 'ENOENT' }).impl, platform: 'win32' }), /sox was not found/);
+    assert.equal(readFileSync(out, 'utf8'), 'earlier recording');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -119,10 +279,10 @@ test('record explains how to install sox when it is not on PATH', async () => {
 });
 
 test('record mentions the microphone permission path on a sox failure', async () => {
-  const sp = fakeSpawn({ code: 2, stderr: 'sox FAIL formats: no device' });
+  const sp = fakeSpawn({ code: 2, stderr: 'sox FAIL formats: no device', audio: Buffer.alloc(0) });
   await assert.rejects(
     record({ settings: S, out: 'a.wav', max: 5, spawnImpl: sp.impl, platform: 'win32' }),
-    (e) => /Settings > Privacy & security > Microphone/.test(e.message) && /code 2/.test(e.message),
+    (e) => /Settings > Privacy & security > Microphone/.test(e.message) && /code 2/.test(e.message) && /no device/.test(e.message),
   );
 });
 
@@ -151,7 +311,7 @@ test('config: record settings default and are validated', () => {
     const s = loadVoiceConfig({ root }).settings;
     assert.deepEqual(
       [s.record_device, s.record_silence_threshold, s.record_stop_silence_s, s.record_max_s],
-      ['default', '1%', 3, 150],
+      ['default', '0.15%', 3, 150],
     );
     mkdirSync(join(root, 'config'));
     const bad = {
