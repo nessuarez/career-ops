@@ -1,0 +1,43 @@
+[
+  {
+    "Id": "seg-1", "RecognitionStatus": "Success", "Offset": 5000000, "Duration": 11000000,
+    "DisplayText": "Thanks for having",
+    "NBest": [{
+      "Confidence": 0.9, "Display": "Thanks for having",
+      "PronunciationAssessment": { "AccuracyScore": 73, "FluencyScore": 80, "ProsodyScore": 70, "CompletenessScore": 100, "PronScore": 75 },
+      "Words": [
+        { "Word": "thanks", "Offset": 5000000, "Duration": 4000000, "PronunciationAssessment": { "AccuracyScore": 90, "ErrorType": "None" }, "Phonemes": [ { "Phoneme": "θ", "PronunciationAssessment": { "AccuracyScore": 90 } } ] },
+        { "Word": "for", "Offset": 9500000, "Duration": 2000000, "PronunciationAssessment": { "AccuracyScore": 80, "ErrorType": "None" }, "Phonemes": [] },
+        { "Word": "having", "Offset": 12000000, "Duration": 4000000, "PronunciationAssessment": { "AccuracyScore": 50, "ErrorType": "None" },
+          "Phonemes": [
+            { "Phoneme": "h", "PronunciationAssessment": { "AccuracyScore": 95 } },
+            { "Phoneme": "æ", "PronunciationAssessment": { "AccuracyScore": 40 } },
+            { "Phoneme": "v", "PronunciationAssessment": { "AccuracyScore": 55 } }
+          ] }
+      ]
+    }]
+  },
+  {
+    "Id": "seg-2", "RecognitionStatus": "Success", "Offset": 45000000, "Duration": 7500000,
+    "DisplayText": "me today",
+    "NBest": [{
+      "Display": "me today",
+      "PronunciationAssessment": { "AccuracyScore": 85, "FluencyScore": 70, "ProsodyScore": 60, "CompletenessScore": 100, "PronScore": 70 },
+      "Words": [
+        { "Word": "me", "Offset": 45000000, "Duration": 2000000, "PronunciationAssessment": { "AccuracyScore": 70, "ErrorType": "None" }, "Phonemes": [] },
+        { "Word": "today", "Offset": 47500000, "Duration": 5000000, "PronunciationAssessment": { "AccuracyScore": 100, "ErrorType": "None" }, "Phonemes": [] }
+      ]
+    }]
+  },
+  {
+    "Id": "seg-3", "RecognitionStatus": "Success", "Offset": 53000000, "Duration": 4000000,
+    "DisplayText": "great",
+    "NBest": [{
+      "Display": "great",
+      "PronunciationAssessment": { "AccuracyScore": 100, "FluencyScore": 90, "ProsodyScore": 80, "CompletenessScore": 100, "PronScore": 90 },
+      "Words": [
+        { "Word": "great", "Offset": 53000000, "Duration": 4000000, "PronunciationAssessment": { "AccuracyScore": 100, "ErrorType": "None" }, "Phonemes": [] }
+      ]
+    }]
+  }
+]

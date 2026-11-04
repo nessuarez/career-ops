@@ -6,9 +6,11 @@ import { createInterface } from 'node:readline';
 import { loadVoiceConfig, MAX_RECORD_S } from './config.mjs';
 import { record, wavInfo } from './recorder.mjs';
 import { assessAudio, summarizeAssessment, MAX_REST_S } from './assess.mjs';
+import { assessAudioContinuous, mergeSegments, loadSpeechSdk } from './assess-sdk.mjs';
+import { parseWavHeader, isSpeechReadyWav, convertToWav, checkFfmpeg } from './audio.mjs';
 import { listVoices, stylesForVoice } from './azure-tts.mjs';
 import { detectPlayer, play } from './player.mjs';
-import { monthUsage } from './usage.mjs';
+import { monthUsage, appendUsage } from './usage.mjs';
 import { createSpeaker, resolvePersona } from './speak.mjs';
 import { cleanMarkdown, selectSection, splitParagraphs, splitSentences } from './markdown.mjs';
 
@@ -85,6 +87,10 @@ export async function doctor(argv, deps, { stdout, root }) {
   }
 
   await checkMic(line, cfg.settings, deps);
+
+  // ffmpeg only matters for phone files; warn-level like sox.
+  const ff = await checkFfmpeg({ spawnImpl: deps.spawnImpl });
+  line(ff.ok ? 'ok' : 'warn', ff.ok ? 'ffmpeg found on PATH' : `ffmpeg: ${ff.message}`);
 
   const month = new Date((deps.now ?? Date.now)()).toISOString().slice(0, 7);
   const used = monthUsage(root, month.replace('-', ''));
@@ -243,7 +249,7 @@ const slug = (name) => name.replace(/\.[^.]*$/, '').toLowerCase().replace(/[^a-z
 
 export async function assessCmd(argv, deps, { stdout, stderr, root }) {
   const o = flags(argv, { '--audio': 'value', '--reference-file': 'value', '--locale': 'value' });
-  if (!o.audio) throw new Error('assess needs --audio <wav>');
+  if (!o.audio) throw new Error('assess needs --audio <file>');
   if (!existsSync(o.audio)) throw new Error(`audio file not found: ${o.audio}`);
   let reference;
   if (o.referenceFile !== undefined) {
@@ -251,26 +257,49 @@ export async function assessCmd(argv, deps, { stdout, stderr, root }) {
     reference = readFileSync(o.referenceFile, 'utf8').trim();
     if (!reference) throw new Error('reference file is empty');
   }
-  const { durationS } = wavInfo(o.audio);
-  if (durationS > MAX_REST_S) {
-    throw new Error(`audio is ${durationS.toFixed(1)} s; assess over REST accepts up to ${MAX_REST_S} s. Longer audio needs the continuous SDK path (not implemented yet); record or split into answers under ${MAX_REST_S} s`);
-  }
 
   const cfg = loadVoiceConfig({ root });
   const s = cfg.settings;
   const locale = o.locale ?? s.locale;
   const mode = reference ? 'scripted' : 'free';
-  stderr('voice: your recording is sent to Azure Speech for assessment.\n');
-  const raw = await assessAudio({ wav: readFileSync(o.audio), reference, locale, region: cfg.azure.region, key: cfg.azure.key, fetchImpl: deps.fetchImpl ?? fetch });
-  const summary = summarizeAssessment(raw, {
-    mode,
-    locale,
-    thresholds: { accuracyMin: s.assess_accuracy_min, prosodyMin: s.assess_prosody_min, wpmMin: s.assess_wpm_min, wpmMax: s.assess_wpm_max, longPauseS: s.assess_long_pause_s, maxWords: s.assess_max_words },
-  });
+  const now = (deps.now ?? Date.now)();
+
+  // Anything but 16 kHz mono 16-bit PCM WAV (phone files, other WAV formats) is converted into a temp file.
+  let wav = readFileSync(o.audio);
+  let header = parseWavHeader(wav);
+  const date = new Date(now).toISOString().slice(0, 10);
+  let summary;
+  const tmpFile = join(root, 'output', 'voice', 'tmp', `assess-${process.pid}-${now}.wav`);
+  try {
+    if (!isSpeechReadyWav(header)) {
+      mkdirSync(dirname(tmpFile), { recursive: true });
+      await convertToWav({ input: resolve(o.audio), out: tmpFile, spawnImpl: deps.spawnImpl });
+      wav = readFileSync(tmpFile);
+      header = parseWavHeader(wav);
+      if (!isSpeechReadyWav(header)) throw new Error('ffmpeg did not produce a 16 kHz mono WAV');
+    }
+    const audioS = header.durationS;
+
+    stderr('voice: your recording is sent to Azure Speech for assessment.\n');
+    let raw;
+    if (audioS <= MAX_REST_S) {
+      raw = await assessAudio({ wav, reference, locale, region: cfg.azure.region, key: cfg.azure.key, fetchImpl: deps.fetchImpl ?? fetch });
+    } else {
+      const sdk = deps.speechSdk ?? (await loadSpeechSdk(deps.importSdk));
+      raw = mergeSegments(await assessAudioContinuous({ wav, reference, locale, region: cfg.azure.region, key: cfg.azure.key, sdk }), { reference });
+    }
+    appendUsage({ root, date, operation: 'assess', seconds: Math.round(audioS * 10) / 10 });
+    summary = summarizeAssessment(raw, {
+      mode,
+      locale,
+      thresholds: { accuracyMin: s.assess_accuracy_min, prosodyMin: s.assess_prosody_min, wpmMin: s.assess_wpm_min, wpmMax: s.assess_wpm_max, longPauseS: s.assess_long_pause_s, maxWords: s.assess_max_words },
+    });
+  } finally {
+    rmSync(tmpFile, { force: true });
+  }
 
   const dir = resolve(root, 'output', 'voice', 'assessments');
   mkdirSync(dir, { recursive: true });
-  const date = new Date((deps.now ?? Date.now)()).toISOString().slice(0, 10);
   const file = join(dir, `${date}-${slug(basename(o.audio))}.json`);
   writeFileSync(file, `${JSON.stringify(summary, null, 2)}\n`);
   stdout(`${file}\n`);

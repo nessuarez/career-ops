@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { detectPlayer, play } from '../voice/lib/player.mjs';
-import { appendUsage, monthUsage, budgetStatus } from '../voice/lib/usage.mjs';
+import { appendUsage, monthUsage, monthSeconds, budgetStatus } from '../voice/lib/usage.mjs';
 import { cacheKey, getCached, putCached } from '../voice/lib/cache.mjs';
 
 const WAV = 'C:\\Users\\a b\\x\'; Remove-Item *; $(evil).wav';
@@ -79,6 +79,19 @@ test('usage appends TSV rows with a header and sums chars per month', () => {
     assert.equal(monthUsage(root, '202610'), 350);
     assert.equal(monthUsage(root, '202611'), 999);
     assert.equal(monthUsage(root, '202601'), 0);
+  });
+});
+
+test('monthSeconds sums the seconds column for one month and ignores chars rows', () => {
+  withRoot((root) => {
+    assert.equal(monthSeconds(root, '202611'), 0);
+    appendUsage({ root, date: '2026-11-01', operation: 'assess', seconds: 12.3 });
+    appendUsage({ root, date: '2026-11-20', operation: 'assess', seconds: 45 });
+    appendUsage({ root, date: '2026-11-21', operation: 'say', chars: 500 });
+    appendUsage({ root, date: '2026-10-31', operation: 'assess', seconds: 99 });
+    assert.equal(monthSeconds(root, '202611'), 57.3);
+    assert.equal(monthSeconds(root, '202610'), 99);
+    assert.equal(monthUsage(root, '202611'), 500);
   });
 });
 

@@ -230,15 +230,6 @@ test('assess (free) sends no reference text', async () => {
   assert.equal(r.written[0].json.mode, 'free');
 });
 
-test('assess refuses audio over 30 s before any network call and points to the SDK path', async () => {
-  const r = await run(['assess', '--audio', '@answer.wav'], { audioS: 31 });
-  assert.equal(r.code, 1);
-  assert.match(r.err, /30 s/);
-  assert.match(r.err, /SDK/);
-  assert.equal(r.calls.length, 0);
-  assert.equal(r.written.length, 0);
-});
-
 test('assess needs --audio and an existing file', async () => {
   assert.equal((await run(['assess'])).code, 1);
   const r = await run(['assess', '--audio', '@missing.wav']);

@@ -1,0 +1,8 @@
+{
+  "name": "career-ops-voice",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "microsoft-cognitiveservices-speech-sdk": "^1.53.0"
+  }
+}
