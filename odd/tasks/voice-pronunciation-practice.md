@@ -53,7 +53,7 @@ Windows, en-US.
 - No recording or key enters git; `node test-all.mjs` still passes.
 
 ## Applicable checks
-`node --test voice/test/` per task; `node test-all.mjs` at feature close.
+`node --test tests/voice-*.test.mjs` per task; `node test-all.mjs` at feature close.
 
 ## Progress / evidence
 - 2026-10-30: dependency met (voice-tts-questions T2-T7 committed; T8 real run still pending there). Branch
@@ -112,5 +112,18 @@ Windows, en-US.
 
 - **T3 live run (2026-11-04), closed.** Free mode on a 16.1 s recording (user-authorized, sent to Azure): REST accepted the request, JSON written to the data root. Pron 74.2, accuracy 86, fluency 76, prosody 69.6; 2 words to fix with IPA; one 1.9 s pause; 78 WPM (flagged slow). Request shape, Content-Type and format=detailed are now verified. Note: timing.duration_s (11.6) is the spoken span, not the file length. Scripted mode not run live.
 
+- **T4 (2026-11-04), route delegated writer** (trigger: 2+ non-trivial files: `voice/lib/assess-sdk.mjs`, `voice/lib/audio.mjs`,
+  `assessCmd`, usage, tests). SDK API checked first against current Microsoft docs (context7): `PronunciationAssessmentConfig.fromJSON`
+  + `enableProsodyAssessment`, `SpeechRecognizer` continuous events, `SpeechServiceResponse_JsonResult`. Discovery: SDK segment JSON
+  nests scores under `PronunciationAssessment` (REST is flat), so a normalizer accepts both. Overall scores recomputed across segments
+  per Microsoft's language-learning JS sample. Scripted SDK mode sends `enableMiscue: false` and aligns words to the reference (LCS)
+  after merging; a substituted word counts as omission + insertion (stricter than Azure's miscue). Commit dcceac07, +900/-29
+  (~700 tests + fixture; over the ~400 heuristic, not trimmed). RED: ERR_MODULE_NOT_FOUND for assess-sdk.mjs/audio.mjs.
+  GREEN: 157/157 voice tests (parent re-ran 157/157), `test-all.mjs --only voice` 11/11 reported.
+  `voice/package.json` declares the SDK (^1.53.0, ~5.6 MB unpacked); **not installed**. ffmpeg not installed on the machine.
+  **Open:** live SDK run over 30 s not done (segment shape, absolute offsets across segments, EndOfStream handling unverified);
+  ffmpeg conversion tested only with a fake spawn. T4 stays unchecked until a live run. Risk not assessed (RDD off); no verifier.
+
 ## Next step
-T4 `assess` continuous (SDK, >30 s). Stacked-to-main PR slicing agreed; no push yet. Engram mirror still pending.
+T4 live run: install the SDK in `voice/` (user decision), then assess a >30 s recording (user confirms sending it to Azure).
+Stacked-to-main PR slicing agreed; no push yet.
