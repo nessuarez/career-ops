@@ -35,10 +35,10 @@ Windows, en-US.
   Save a de-identified response as test fixture. Adjust summary shape to the real fields.
 - [x] **T2 `record`:** SoX `waveaudio` with silence detection, `record_device`, thresholds in YAML;
   `doctor` checks `sox` on PATH and a 2 s non-silent test recording; mic-permission message.
-- [ ] **T3 `assess` (REST, ≤30 s):** scripted vs free mode, parameters (HundredMark, Phoneme, EnableMiscue,
+- [x] **T3 `assess` (REST, ≤30 s):** scripted vs free mode, parameters (HundredMark, Phoneme, EnableMiscue,
   prosody, IPA), summary JSON (scores, timing/WPM/long pauses, words_to_fix ≤3, prosody_flags, omitted/inserted)
   + fixture-based tests.
-- [ ] **T4 `assess` continuous (SDK, >30 s):** same summary from a WAV 16 kHz mono; auto-select REST vs SDK;
+- [x] **T4 `assess` continuous (SDK, >30 s):** same summary from a WAV 16 kHz mono; auto-select REST vs SDK;
   `--audio` conversion via ffmpeg for phone files; usage counter in seconds.
 - [ ] **T5 `drill` and `progress`:** `drill --reference-file [--listen-first]` (reuses `read`), `progress --since`.
 - [ ] **T6 Integration:** `answer_mode` setting, transcript-correction step, "Pronunciación y tono" block,
@@ -53,7 +53,7 @@ Windows, en-US.
 - No recording or key enters git; `node test-all.mjs` still passes.
 
 ## Applicable checks
-`node --test voice/test/` per task; `node test-all.mjs` at feature close.
+`node --test tests/voice-*.test.mjs` per task; `node test-all.mjs` at feature close.
 
 ## Progress / evidence
 - 2026-10-30: dependency met (voice-tts-questions T2-T7 committed; T8 real run still pending there). Branch
@@ -95,6 +95,53 @@ Windows, en-US.
   0.5 s; no speech by max deletes the file. RED: missing export; GREEN: 104/104 voice tests, `--only voice` 8/8 (parent re-ran
   104/104). Real checks: 5 s quiet run reported no speech and left no file; user speech run recorded 16.1 s.
 
+- **Delivery strategy (2026-11-03, user): `stacked-to-main`.** main...HEAD is 25 files, +2904 (includes the stacked TTS base).
+  Slices: (1) TTS base aee60147..6cd5883e, (2) T2 record 32df8f7b..464f07e9 + fixtures, (3) T3+ in PRs of ~400 authored lines
+  each. Each PR targets the previous one, then main. No push without asking. Engram mirror `odd/voice-pronunciation-practice/tasks`:
+  not found at T3 start (search empty); mirror pending.
+- **T3 route (2026-11-03):** delegated writer (2+ non-trivial files: `voice/lib/assess.mjs`, `voice.mjs` wiring, config keys, tests).
+  Tests live in `tests/voice-*.test.mjs` (not `voice/test/`); runner `node --test tests/voice-*.test.mjs`.
+
+- **T3 (2026-11-04), delegated writer.** RED: ERR_MODULE_NOT_FOUND for voice/lib/assess.mjs (later two old stub tests
+  failed as expected and were updated). GREEN: 123/123 voice tests (parent re-ran),  9/9 reported.
+  ~470 authored lines (tests 271, code ~200), over the ~400 heuristic; not trimmed. Fixture-derived rules enforced by tests
+  (flat NBest scores, 100 ns ticks, no per-word Monotone, pauses from timing gaps, omissions excluded from words_to_fix).
+  New config keys assess_{accuracy_min,prosody_min,wpm_min,wpm_max,long_pause_s,max_words}. **Open:** live REST call not run
+  (request shape, Content-Type sample rate, format=detailed unverified against Azure), so T3 stays unchecked until one real
+  smoke run; pace/pause rules are interpretation, not checked on real audio. Risk tier not assessed (RDD off); no verifier run.
+
+- **T3 live run (2026-11-04), closed.** Free mode on a 16.1 s recording (user-authorized, sent to Azure): REST accepted the request, JSON written to the data root. Pron 74.2, accuracy 86, fluency 76, prosody 69.6; 2 words to fix with IPA; one 1.9 s pause; 78 WPM (flagged slow). Request shape, Content-Type and format=detailed are now verified. Note: timing.duration_s (11.6) is the spoken span, not the file length. Scripted mode not run live.
+
+- **T4 (2026-11-04), route delegated writer** (trigger: 2+ non-trivial files: `voice/lib/assess-sdk.mjs`, `voice/lib/audio.mjs`,
+  `assessCmd`, usage, tests). SDK API checked first against current Microsoft docs (context7): `PronunciationAssessmentConfig.fromJSON`
+  + `enableProsodyAssessment`, `SpeechRecognizer` continuous events, `SpeechServiceResponse_JsonResult`. Discovery: SDK segment JSON
+  nests scores under `PronunciationAssessment` (REST is flat), so a normalizer accepts both. Overall scores recomputed across segments
+  per Microsoft's language-learning JS sample. Scripted SDK mode sends `enableMiscue: false` and aligns words to the reference (LCS)
+  after merging; a substituted word counts as omission + insertion (stricter than Azure's miscue). Commit dcceac07, +900/-29
+  (~700 tests + fixture; over the ~400 heuristic, not trimmed). RED: ERR_MODULE_NOT_FOUND for assess-sdk.mjs/audio.mjs.
+  GREEN: 157/157 voice tests (parent re-ran 157/157), `test-all.mjs --only voice` 11/11 reported.
+  `voice/package.json` declares the SDK (^1.53.0, ~5.6 MB unpacked); **not installed**. ffmpeg not installed on the machine.
+  **Open:** live SDK run over 30 s not done (segment shape, absolute offsets across segments, EndOfStream handling unverified);
+  ffmpeg conversion tested only with a fake spawn. T4 stays unchecked until a live run. Risk not assessed (RDD off); no verifier.
+
+- **T4 live SDK run (2026-11-05).** User approved installing the SDK: `npm install` in `voice/` (1.53.0, 13 MB on disk, 0
+  vulnerabilities; `node_modules` and `package-lock.json` are gitignored). First live run failed: `pa.enableProsodyAssessment is
+  not a function`. In the JS SDK it is a setter (1.53.0 `PronunciationAssessmentConfig.d.ts`); the docs snippet passed to the
+  writer was wrong for JS and the fake mirrored it. Fixed inline (1 file + test): fake changed to a setter, RED observed (same
+  error, 5 failing), GREEN 157/157. Second run, free mode, 99.3 s WAV (user-authorized, sent to Azure): pron 77.2, accuracy
+  91.6, fluency 80.1, prosody 71.4; 3 words to fix with IPA; one 1.2 s pause; 111 WPM (flagged slow); usage ledger got
+  `assess 99.3`. Verified live: nested segment shape with IPA phonemes, offsets absolute across segments (spoken span 97.7 s of
+  99.3 s), EndOfStream finish. Still open: ffmpeg conversion of a phone file (ffmpeg not installed), and scripted mode over SDK.
+
+- **T4 closed (2026-11-05).** User installed ffmpeg 9.0.2 (winget Gyan.FFmpeg; shells opened before the install lack it on
+  PATH). Real conversion, local only: the 16.1 s WAV encoded to stereo 44.1 kHz AAC `.m4a` (simulated phone file), then
+  `convertToWav` gave PCM 16 kHz mono 16-bit, 16.1 s, `isSpeechReadyWav` true; `checkFfmpeg` ok; `doctor` "ffmpeg found on PATH".
+  Not sent to Azure again: REST and SDK paths are already verified live, and the conversion-to-assess wiring is fake-tested.
+  Still not run live: scripted mode over the SDK (LCS miscue alignment).
+
+- **Delivery (2026-11-05, user):** T3+T4 shipped together in draft PR #3 (`feat/voice-pronunciation-practice` -> `feat/voice-record`),
+  ~1.4k lines incl. tests. The unrelated ODD-docs commit e4646507 was moved to main (user, 2026-11-05). T5 deferred by the user.
+
 ## Next step
-T3 `assess` (REST, ≤30 s), using the committed fixtures in `tests/fixtures/voice/`. Delivery strategy question (running
-count over ~400 lines) is still unasked.
+T5 `drill` and `progress` (deferred).
+Stacked-to-main PR slicing agreed; no push yet.

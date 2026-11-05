@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EventEmitter } from 'node:events';
 import { main } from '../voice/voice.mjs';
 
 const KEY = 'fake-key-0123456789abcdef';
@@ -14,7 +15,7 @@ const VOICES = [
   { ShortName: 'es-ES-ElviraNeural', Locale: 'es-ES', Gender: 'Female' },
 ];
 
-async function run(args, { yml, env = `AZURE_SPEECH_KEY=${KEY}\nAZURE_SPEECH_REGION=northeurope\n`, status = 200, usage } = {}) {
+async function run(args, { yml, env = `AZURE_SPEECH_KEY=${KEY}\nAZURE_SPEECH_REGION=northeurope\n`, status = 200, usage, extra = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'voice-dv-'));
   const saved = Object.fromEntries(ENV_VARS.map((k) => [k, process.env[k]]));
   ENV_VARS.forEach((k) => delete process.env[k]);
@@ -37,6 +38,7 @@ async function run(args, { yml, env = `AZURE_SPEECH_KEY=${KEY}\nAZURE_SPEECH_REG
       recordImpl: async () => { throw Object.assign(new Error('no mic in tests'), { code: 'SOX_MISSING' }); },
       stdout: (s) => out.push(s),
       stderr: (s) => err.push(s),
+      ...extra,
       fetchImpl: async () => ({ ok: status === 200, status, json: async () => VOICES }),
     };
     const code = await main(args, deps);
@@ -111,10 +113,31 @@ test('voices needs --locale and never leaks the key on errors', async () => {
   assert.match(c.err, /xx-XX/);
 });
 
-test('assess, drill and progress stay not implemented', async () => {
-  for (const c of ['assess', 'drill', 'progress']) {
+test('drill and progress stay not implemented', async () => {
+  for (const c of ['drill', 'progress']) {
     const r = await run([c]);
     assert.equal(r.code, 1);
     assert.match(r.err, /not implemented yet/);
   }
+});
+
+// --- ffmpeg check (warn level: only phone files and long audio need it) ---
+
+const ffmpegSpawn = (error) => (cmd, args) => {
+  const child = new EventEmitter();
+  child.stderr = new EventEmitter();
+  setImmediate(() => (error ? child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })) : child.emit('close', 0)));
+  return child;
+};
+
+test('doctor reports ffmpeg on PATH as ok', async () => {
+  const r = await run(['doctor'], { extra: { spawnImpl: ffmpegSpawn(false) } });
+  assert.match(r.out, /ok\s+ffmpeg found on PATH/);
+});
+
+test('doctor warns, without failing, when ffmpeg is missing', async () => {
+  const r = await run(['doctor'], { extra: { spawnImpl: ffmpegSpawn(true) } });
+  assert.equal(r.code, 0);
+  assert.match(r.out, /warn\s+ffmpeg/);
+  assert.match(r.out, /winget install Gyan\.FFmpeg/);
 });
