@@ -60,7 +60,8 @@ function fakeSdk({ segments = SEGMENTS, end = 'eos', errorDetails } = {}) {
     PronunciationAssessmentConfig: {
       fromJSON: (j) => {
         calls.paJson = JSON.parse(j);
-        return { enableProsodyAssessment: () => { calls.prosody = true; }, applyTo: (r) => { calls.applied = r; } };
+        // The real SDK exposes prosody as a setter, not a method (checked against 1.53.0 PronunciationAssessmentConfig.d.ts).
+        return { set enableProsodyAssessment(v) { calls.prosody = v; }, applyTo: (r) => { calls.applied = r; } };
       },
     },
     PropertyId: { SpeechServiceResponse_JsonResult: 'JSON_RESULT' },

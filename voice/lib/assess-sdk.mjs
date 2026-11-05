@@ -137,7 +137,7 @@ export async function assessAudioContinuous({ wav, reference, locale = 'en-US', 
       const pa = sdk.PronunciationAssessmentConfig.fromJSON(JSON.stringify({
         referenceText: reference ?? '', gradingSystem: 'HundredMark', granularity: 'Phoneme', phonemeAlphabet: 'IPA', enableMiscue: false,
       }));
-      pa.enableProsodyAssessment();
+      pa.enableProsodyAssessment = true; // a setter in the JS SDK, not a method
       reco = new sdk.SpeechRecognizer(speechConfig, audioConfig);
       pa.applyTo(reco);
       reco.recognized = (_s, e) => {
