@@ -139,6 +139,9 @@ Windows, en-US.
   Not sent to Azure again: REST and SDK paths are already verified live, and the conversion-to-assess wiring is fake-tested.
   Still not run live: scripted mode over the SDK (LCS miscue alignment).
 
+- **Delivery (2026-11-05, user):** T3+T4 shipped together in draft PR #3 (`feat/voice-pronunciation-practice` -> `feat/voice-record`),
+  ~1.8k lines incl. tests and the unrelated ODD-docs commit e4646507. T5 deferred by the user.
+
 ## Next step
-T5 `drill` and `progress`.
+T5 `drill` and `progress` (deferred).
 Stacked-to-main PR slicing agreed; no push yet.
