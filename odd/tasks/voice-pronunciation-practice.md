@@ -140,7 +140,7 @@ Windows, en-US.
   Still not run live: scripted mode over the SDK (LCS miscue alignment).
 
 - **Delivery (2026-11-05, user):** T3+T4 shipped together in draft PR #3 (`feat/voice-pronunciation-practice` -> `feat/voice-record`),
-  ~1.8k lines incl. tests and the unrelated ODD-docs commit e4646507. T5 deferred by the user.
+  ~1.4k lines incl. tests. The unrelated ODD-docs commit e4646507 was moved to main (user, 2026-11-05). T5 deferred by the user.
 
 ## Next step
 T5 `drill` and `progress` (deferred).
