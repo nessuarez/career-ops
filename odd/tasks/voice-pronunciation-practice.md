@@ -124,6 +124,15 @@ Windows, en-US.
   **Open:** live SDK run over 30 s not done (segment shape, absolute offsets across segments, EndOfStream handling unverified);
   ffmpeg conversion tested only with a fake spawn. T4 stays unchecked until a live run. Risk not assessed (RDD off); no verifier.
 
+- **T4 live SDK run (2026-11-05).** User approved installing the SDK: `npm install` in `voice/` (1.53.0, 13 MB on disk, 0
+  vulnerabilities; `node_modules` and `package-lock.json` are gitignored). First live run failed: `pa.enableProsodyAssessment is
+  not a function`. In the JS SDK it is a setter (1.53.0 `PronunciationAssessmentConfig.d.ts`); the docs snippet passed to the
+  writer was wrong for JS and the fake mirrored it. Fixed inline (1 file + test): fake changed to a setter, RED observed (same
+  error, 5 failing), GREEN 157/157. Second run, free mode, 99.3 s WAV (user-authorized, sent to Azure): pron 77.2, accuracy
+  91.6, fluency 80.1, prosody 71.4; 3 words to fix with IPA; one 1.2 s pause; 111 WPM (flagged slow); usage ledger got
+  `assess 99.3`. Verified live: nested segment shape with IPA phonemes, offsets absolute across segments (spoken span 97.7 s of
+  99.3 s), EndOfStream finish. Still open: ffmpeg conversion of a phone file (ffmpeg not installed), and scripted mode over SDK.
+
 ## Next step
-T4 live run: install the SDK in `voice/` (user decision), then assess a >30 s recording (user confirms sending it to Azure).
+T4: live ffmpeg conversion of a phone file (needs ffmpeg installed, user decision); then T5.
 Stacked-to-main PR slicing agreed; no push yet.
