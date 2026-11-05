@@ -38,7 +38,7 @@ Windows, en-US.
 - [x] **T3 `assess` (REST, ≤30 s):** scripted vs free mode, parameters (HundredMark, Phoneme, EnableMiscue,
   prosody, IPA), summary JSON (scores, timing/WPM/long pauses, words_to_fix ≤3, prosody_flags, omitted/inserted)
   + fixture-based tests.
-- [ ] **T4 `assess` continuous (SDK, >30 s):** same summary from a WAV 16 kHz mono; auto-select REST vs SDK;
+- [x] **T4 `assess` continuous (SDK, >30 s):** same summary from a WAV 16 kHz mono; auto-select REST vs SDK;
   `--audio` conversion via ffmpeg for phone files; usage counter in seconds.
 - [ ] **T5 `drill` and `progress`:** `drill --reference-file [--listen-first]` (reuses `read`), `progress --since`.
 - [ ] **T6 Integration:** `answer_mode` setting, transcript-correction step, "Pronunciación y tono" block,
@@ -133,6 +133,12 @@ Windows, en-US.
   `assess 99.3`. Verified live: nested segment shape with IPA phonemes, offsets absolute across segments (spoken span 97.7 s of
   99.3 s), EndOfStream finish. Still open: ffmpeg conversion of a phone file (ffmpeg not installed), and scripted mode over SDK.
 
+- **T4 closed (2026-11-05).** User installed ffmpeg 9.0.2 (winget Gyan.FFmpeg; shells opened before the install lack it on
+  PATH). Real conversion, local only: the 16.1 s WAV encoded to stereo 44.1 kHz AAC `.m4a` (simulated phone file), then
+  `convertToWav` gave PCM 16 kHz mono 16-bit, 16.1 s, `isSpeechReadyWav` true; `checkFfmpeg` ok; `doctor` "ffmpeg found on PATH".
+  Not sent to Azure again: REST and SDK paths are already verified live, and the conversion-to-assess wiring is fake-tested.
+  Still not run live: scripted mode over the SDK (LCS miscue alignment).
+
 ## Next step
-T4: live ffmpeg conversion of a phone file (needs ffmpeg installed, user decision); then T5.
+T5 `drill` and `progress`.
 Stacked-to-main PR slicing agreed; no push yet.
