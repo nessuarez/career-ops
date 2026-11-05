@@ -142,6 +142,24 @@ Windows, en-US.
 - **Delivery (2026-11-05, user):** T3+T4 shipped together in draft PR #3 (`feat/voice-pronunciation-practice` -> `feat/voice-record`),
   ~1.4k lines incl. tests. The unrelated ODD-docs commit e4646507 was moved to main (user, 2026-11-05). T5 deferred by the user.
 
+- **T5 start (2026-11-05).** Branch `feat/voice-drill-progress` from 0092c200 (tip of PR #3); T5 ships in a new PR -> #3.
+  Decision (user): add `keep_recordings` to `config/voice.yml`, default `false`; `drill` deletes its WAV after assessing
+  and keeps only the summary JSON. `record` and `assess` keep files as before (they act on files the user names).
+  Defaults chosen without a user decision: `progress --since` accepts `YYYY-MM-DD` or `Nd` (default `30d`), session date
+  from the JSON filename prefix; the drill reference is cleaned with `cleanMarkdown` before being sent as ReferenceText.
+  Route: delegated writer (trigger: 2+ non-trivial files: `voice/lib/progress.mjs`, `drillCmd`/`progressCmd` in
+  `commands.mjs`, config key, CLI wiring, tests). TDD strict, runner `node --test tests/voice-*.test.mjs`.
+
+- **T5 implementation (2026-11-05), delegated writer.** Commit 3f7a351c, +530/-41 (tests 341; over the ~400 heuristic, not
+  trimmed). RED: ERR_MODULE_NOT_FOUND for `voice/lib/progress.mjs`; drill tests failed with `"drill" is not implemented yet`.
+  GREEN: 175/175 voice tests (parent re-ran 175/175), `test-all.mjs --only voice` 13/13 reported; empty data root
+  `progress --since 2000-01-01` printed "No sessions since 2000-01-01." exit 0. Refactor: `assessCmd` body moved to an internal
+  `runAssessment({ audioPath, reference, ... })` (reference as text) shared with `drill`; `recordCmd` uses a shared `recordTo()`
+  with a `deps.recordImpl` seam. Writer's choices: `drill` has no `--max` (uses `record_max_s`); `--locale` affects the assessment
+  only, `--listen-first` playback uses the persona locale. `progress` counts repeats once per session (2+ sessions), has `--json`.
+  Two old "not implemented" tests were replaced. Risk not assessed (RDD off); no verifier. **Open:** live scripted `drill` run
+  (REST) not done; T5 stays unchecked until it is observed.
+
 ## Next step
-T5 `drill` and `progress` (deferred).
+T5: live scripted `drill` run (needs user confirmation before sending audio), then `progress` over the real assessments.
 Stacked-to-main PR slicing agreed; no push yet.
