@@ -40,7 +40,7 @@ Windows, en-US.
   + fixture-based tests.
 - [x] **T4 `assess` continuous (SDK, >30 s):** same summary from a WAV 16 kHz mono; auto-select REST vs SDK;
   `--audio` conversion via ffmpeg for phone files; usage counter in seconds.
-- [ ] **T5 `drill` and `progress`:** `drill --reference-file [--listen-first]` (reuses `read`), `progress --since`.
+- [x] **T5 `drill` and `progress`:** `drill --reference-file [--listen-first]` (reuses `read`), `progress --since`.
 - [ ] **T6 Integration:** `answer_mode` setting, transcript-correction step, "Pronunciación y tono" block,
   skill section, `_custom.md` rule extension.
 - [ ] **T7 Real run:** 3 questions in `answer_mode: spoken`; verify acceptance criteria below.
@@ -142,6 +142,33 @@ Windows, en-US.
 - **Delivery (2026-11-05, user):** T3+T4 shipped together in draft PR #3 (`feat/voice-pronunciation-practice` -> `feat/voice-record`),
   ~1.4k lines incl. tests. The unrelated ODD-docs commit e4646507 was moved to main (user, 2026-11-05). T5 deferred by the user.
 
+- **T5 start (2026-11-05).** Branch `feat/voice-drill-progress` from 0092c200 (tip of PR #3); T5 ships in a new PR -> #3.
+  Decision (user): add `keep_recordings` to `config/voice.yml`, default `false`; `drill` deletes its WAV after assessing
+  and keeps only the summary JSON. `record` and `assess` keep files as before (they act on files the user names).
+  Defaults chosen without a user decision: `progress --since` accepts `YYYY-MM-DD` or `Nd` (default `30d`), session date
+  from the JSON filename prefix; the drill reference is cleaned with `cleanMarkdown` before being sent as ReferenceText.
+  Route: delegated writer (trigger: 2+ non-trivial files: `voice/lib/progress.mjs`, `drillCmd`/`progressCmd` in
+  `commands.mjs`, config key, CLI wiring, tests). TDD strict, runner `node --test tests/voice-*.test.mjs`.
+
+- **T5 implementation (2026-11-05), delegated writer.** Commit 3f7a351c, +530/-41 (tests 341; over the ~400 heuristic, not
+  trimmed). RED: ERR_MODULE_NOT_FOUND for `voice/lib/progress.mjs`; drill tests failed with `"drill" is not implemented yet`.
+  GREEN: 175/175 voice tests (parent re-ran 175/175), `test-all.mjs --only voice` 13/13 reported; empty data root
+  `progress --since 2000-01-01` printed "No sessions since 2000-01-01." exit 0. Refactor: `assessCmd` body moved to an internal
+  `runAssessment({ audioPath, reference, ... })` (reference as text) shared with `drill`; `recordCmd` uses a shared `recordTo()`
+  with a `deps.recordImpl` seam. Writer's choices: `drill` has no `--max` (uses `record_max_s`); `--locale` affects the assessment
+  only, `--listen-first` playback uses the persona locale. `progress` counts repeats once per session (2+ sessions), has `--json`.
+  Two old "not implemented" tests were replaced. Risk not assessed (RDD off); no verifier. **Open:** live scripted `drill` run
+  (REST) not done; T5 stays unchecked until it is observed.
+
+- **T5 closed (2026-11-05), live run.** User-confirmed send to Azure. `drill --listen-first` on a 2-sentence neutral reference
+  (scratchpad, not committed): TTS played, recording stopped on silence, REST scripted assessment, exit 0. Pron 82.3, accuracy 87,
+  fluency 81, prosody 76.2, completeness 91; 120 WPM; no long pauses; 0 words to fix (none below 60, no Mispronunciation).
+  Miscue detection verified live: real misreads reported (omitted `a`, `in`; inserted `that`, `into`). WAV deleted
+  (`keep_recordings` default false). `progress --since 30d` listed the 3 real sessions with averages and first-to-last change
+  (pron +8.1); no repeated words yet. Scripted mode over REST is now verified live; scripted over the SDK (>30 s, LCS alignment)
+  is still not run live. Noted, not changed: drill's console summary does not print omitted/inserted (they are in the JSON).
+
 ## Next step
-T5 `drill` and `progress` (deferred).
+T5 done and shipped in draft PR #5 (`feat/voice-drill-progress` -> `feat/voice-pronunciation-practice`, user-approved push). Next: T6 (ask default
+`answer_mode` first).
 Stacked-to-main PR slicing agreed; no push yet.

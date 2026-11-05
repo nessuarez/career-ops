@@ -27,6 +27,7 @@ export const DEFAULTS = Object.freeze({
   assess_wpm_max: 160,
   assess_long_pause_s: 1.0, // a gap between words at least this long is reported
   assess_max_words: 3, // words to fix per answer, so the feedback stays usable
+  keep_recordings: false, // drill deletes its recording after assessing unless true
   personas: {},
 });
 
@@ -93,6 +94,7 @@ function validate(s, where, partial) {
   if (has('assess_wpm_min') && has('assess_wpm_max') && s.assess_wpm_min > s.assess_wpm_max) fail(`${where}assess_wpm_min must not exceed assess_wpm_max`);
   check('assess_long_pause_s', (v) => typeof v === 'number' && v > 0, 'a positive number of seconds');
   check('assess_max_words', (v) => Number.isInteger(v) && v > 0, 'a positive integer');
+  check('keep_recordings', (v) => typeof v === 'boolean', 'a boolean');
 }
 
 export function loadVoiceConfig({ root } = {}) {

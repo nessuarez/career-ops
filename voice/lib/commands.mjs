@@ -13,6 +13,7 @@ import { detectPlayer, play } from './player.mjs';
 import { monthUsage, appendUsage } from './usage.mjs';
 import { createSpeaker, resolvePersona } from './speak.mjs';
 import { cleanMarkdown, selectSection, splitParagraphs, splitSentences } from './markdown.mjs';
+import { parseSince, loadAssessments, summarizeProgress, formatProgress } from './progress.mjs';
 
 const MAX_REQUEST_CHARS = 3000;
 const RATE_RE = /^[+-]?\d+(\.\d+)?%$/;
@@ -228,18 +229,23 @@ function recordingPath(root, out, now) {
   return target;
 }
 
+// Records one take into `target` (announced on stdout); deps.recordImpl replaces sox in tests.
+async function recordTo({ target, max, deps, stdout, root }) {
+  const { settings } = loadVoiceConfig({ root });
+  mkdirSync(dirname(target), { recursive: true });
+  stdout(`Listening: speak now. Recording stops after ${settings.record_stop_silence_s} s of silence once you have spoken.\n`);
+  const seconds = max ?? settings.record_max_s;
+  if (deps.recordImpl) return deps.recordImpl({ out: target, seconds });
+  return record({ settings, out: target, max: seconds, spawnImpl: deps.spawnImpl, platform: deps.platform ?? process.platform });
+}
+
 export async function recordCmd(argv, deps, { stdout, root }) {
   const o = flags(argv, { '--out': 'value', '--max': 'value' });
   const max = o.max !== undefined ? Number(o.max) : undefined;
   if (max !== undefined && !(max > 0 && max <= MAX_RECORD_S)) throw new Error(`--max must be a number of seconds above 0 and up to ${MAX_RECORD_S}, got "${o.max}"`);
   const target = recordingPath(root, o.out, (deps.now ?? Date.now)());
-  const { settings } = loadVoiceConfig({ root });
-  mkdirSync(dirname(target), { recursive: true });
-  stdout(`Listening: speak now. Recording stops after ${settings.record_stop_silence_s} s of silence once you have spoken.\n`);
-  const r = await record({ settings, out: target, max: max ?? settings.record_max_s, spawnImpl: deps.spawnImpl, platform: deps.platform ?? process.platform });
-  stdout(`${r.path}
-${r.durationS.toFixed(1)} s
-`);
+  const r = await recordTo({ target, max, deps, stdout, root });
+  stdout(`${r.path}\n${r.durationS.toFixed(1)} s\n`);
   return 0;
 }
 
@@ -247,25 +253,17 @@ ${r.durationS.toFixed(1)} s
 
 const slug = (name) => name.replace(/\.[^.]*$/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'audio';
 
-export async function assessCmd(argv, deps, { stdout, stderr, root }) {
-  const o = flags(argv, { '--audio': 'value', '--reference-file': 'value', '--locale': 'value' });
-  if (!o.audio) throw new Error('assess needs --audio <file>');
-  if (!existsSync(o.audio)) throw new Error(`audio file not found: ${o.audio}`);
-  let reference;
-  if (o.referenceFile !== undefined) {
-    if (!existsSync(o.referenceFile)) throw new Error(`reference file not found: ${o.referenceFile}`);
-    reference = readFileSync(o.referenceFile, 'utf8').trim();
-    if (!reference) throw new Error('reference file is empty');
-  }
-
+// Shared by assess and drill: converts if needed, sends to Azure (REST or SDK), counts usage, writes the summary JSON.
+// `reference` is the reference text (scripted mode) or undefined (free mode).
+async function runAssessment({ audioPath, reference, locale: localeOpt, deps, root, stderr }) {
   const cfg = loadVoiceConfig({ root });
   const s = cfg.settings;
-  const locale = o.locale ?? s.locale;
+  const locale = localeOpt ?? s.locale;
   const mode = reference ? 'scripted' : 'free';
   const now = (deps.now ?? Date.now)();
 
   // Anything but 16 kHz mono 16-bit PCM WAV (phone files, other WAV formats) is converted into a temp file.
-  let wav = readFileSync(o.audio);
+  let wav = readFileSync(audioPath);
   let header = parseWavHeader(wav);
   const date = new Date(now).toISOString().slice(0, 10);
   let summary;
@@ -273,7 +271,7 @@ export async function assessCmd(argv, deps, { stdout, stderr, root }) {
   try {
     if (!isSpeechReadyWav(header)) {
       mkdirSync(dirname(tmpFile), { recursive: true });
-      await convertToWav({ input: resolve(o.audio), out: tmpFile, spawnImpl: deps.spawnImpl });
+      await convertToWav({ input: resolve(audioPath), out: tmpFile, spawnImpl: deps.spawnImpl });
       wav = readFileSync(tmpFile);
       header = parseWavHeader(wav);
       if (!isSpeechReadyWav(header)) throw new Error('ffmpeg did not produce a 16 kHz mono WAV');
@@ -300,8 +298,67 @@ export async function assessCmd(argv, deps, { stdout, stderr, root }) {
 
   const dir = resolve(root, 'output', 'voice', 'assessments');
   mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${date}-${slug(basename(o.audio))}.json`);
+  const file = join(dir, `${date}-${slug(basename(audioPath))}.json`);
   writeFileSync(file, `${JSON.stringify(summary, null, 2)}\n`);
+  return { file, summary };
+}
+
+export async function assessCmd(argv, deps, { stdout, stderr, root }) {
+  const o = flags(argv, { '--audio': 'value', '--reference-file': 'value', '--locale': 'value' });
+  if (!o.audio) throw new Error('assess needs --audio <file>');
+  if (!existsSync(o.audio)) throw new Error(`audio file not found: ${o.audio}`);
+  let reference;
+  if (o.referenceFile !== undefined) {
+    if (!existsSync(o.referenceFile)) throw new Error(`reference file not found: ${o.referenceFile}`);
+    reference = readFileSync(o.referenceFile, 'utf8').trim();
+    if (!reference) throw new Error('reference file is empty');
+  }
+  const { file } = await runAssessment({ audioPath: o.audio, reference, locale: o.locale, deps, root, stderr });
   stdout(`${file}\n`);
+  return 0;
+}
+
+// --- drill ---
+
+const r1 = (n) => (typeof n === 'number' ? String(Math.round(n * 10) / 10) : '-');
+
+function formatDrillSummary(s) {
+  const sc = s.scores ?? {};
+  const lines = [['pronunciation', 'accuracy', 'fluency', 'prosody', 'completeness'].filter((k) => k in sc).map((k) => `${k} ${r1(sc[k])}`).join(' | ')];
+  lines.push(`pace ${s.timing?.wpm ?? '-'} wpm`);
+  const fix = (s.words_to_fix ?? []).map((w) => `${w.word} (${r1(w.accuracy)}${w.worst_phonemes?.[0] ? `, ${w.worst_phonemes[0].phoneme}` : ''})`);
+  if (fix.length) lines.push(`words to fix: ${fix.join(', ')}`);
+  return `${lines.join('\n')}\n`;
+}
+
+export async function drillCmd(argv, deps, { stdout, stderr, root }) {
+  const o = flags(argv, { '--reference-file': 'value', '--listen-first': 'bool', '--persona': 'value', '--locale': 'value' });
+  if (!o.referenceFile) throw new Error('drill needs --reference-file <path>');
+  if (!existsSync(o.referenceFile)) throw new Error(`reference file not found: ${o.referenceFile}`);
+  const reference = cleanMarkdown(readFileSync(o.referenceFile, 'utf8')).trim();
+  if (!reference) throw new Error('nothing to practice after cleaning the reference file (it is empty)');
+  const { settings } = loadVoiceConfig({ root });
+
+  if (o.listenFirst) await readCmd(['--file', o.referenceFile, ...(o.persona !== undefined ? ['--persona', o.persona] : [])], deps, { stdout, stderr, root });
+
+  const target = recordingPath(root, undefined, (deps.now ?? Date.now)());
+  const rec = await recordTo({ target, deps, stdout, root });
+  let result;
+  try {
+    result = await runAssessment({ audioPath: rec.path ?? target, reference, locale: o.locale, deps, root, stderr });
+  } finally {
+    if (!settings.keep_recordings) rmSync(rec.path ?? target, { force: true });
+  }
+  stdout(`${result.file}\n${formatDrillSummary(result.summary)}`);
+  return 0;
+}
+
+// --- progress ---
+
+export async function progressCmd(argv, deps, { stdout, stderr, root }) {
+  const o = flags(argv, { '--since': 'value', '--json': 'bool' });
+  const since = parseSince(o.since, (deps.now ?? Date.now)());
+  const result = summarizeProgress(loadAssessments(root, since, { warn: (m) => stderr(`voice: ${m}\n`) }));
+  stdout(o.json ? `${JSON.stringify({ since, ...result }, null, 2)}\n` : formatProgress(result, since));
   return 0;
 }

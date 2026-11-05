@@ -26,6 +26,7 @@ voice:
   assess_wpm_max: 160
   assess_long_pause_s: 1.0       # a gap between two words at least this long is reported
   assess_max_words: 3            # words to fix per answer
+  keep_recordings: false         # drill deletes its recording after assessing; true keeps the WAV (record/assess never delete)
 
   # Interviewer persona overlays; any base setting above can be overridden.
   personas:
