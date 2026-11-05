@@ -40,7 +40,7 @@ Windows, en-US.
   + fixture-based tests.
 - [x] **T4 `assess` continuous (SDK, >30 s):** same summary from a WAV 16 kHz mono; auto-select REST vs SDK;
   `--audio` conversion via ffmpeg for phone files; usage counter in seconds.
-- [ ] **T5 `drill` and `progress`:** `drill --reference-file [--listen-first]` (reuses `read`), `progress --since`.
+- [x] **T5 `drill` and `progress`:** `drill --reference-file [--listen-first]` (reuses `read`), `progress --since`.
 - [ ] **T6 Integration:** `answer_mode` setting, transcript-correction step, "Pronunciación y tono" block,
   skill section, `_custom.md` rule extension.
 - [ ] **T7 Real run:** 3 questions in `answer_mode: spoken`; verify acceptance criteria below.
@@ -160,6 +160,15 @@ Windows, en-US.
   Two old "not implemented" tests were replaced. Risk not assessed (RDD off); no verifier. **Open:** live scripted `drill` run
   (REST) not done; T5 stays unchecked until it is observed.
 
+- **T5 closed (2026-11-05), live run.** User-confirmed send to Azure. `drill --listen-first` on a 2-sentence neutral reference
+  (scratchpad, not committed): TTS played, recording stopped on silence, REST scripted assessment, exit 0. Pron 82.3, accuracy 87,
+  fluency 81, prosody 76.2, completeness 91; 120 WPM; no long pauses; 0 words to fix (none below 60, no Mispronunciation).
+  Miscue detection verified live: real misreads reported (omitted `a`, `in`; inserted `that`, `into`). WAV deleted
+  (`keep_recordings` default false). `progress --since 30d` listed the 3 real sessions with averages and first-to-last change
+  (pron +8.1); no repeated words yet. Scripted mode over REST is now verified live; scripted over the SDK (>30 s, LCS alignment)
+  is still not run live. Noted, not changed: drill's console summary does not print omitted/inserted (they are in the JSON).
+
 ## Next step
-T5: live scripted `drill` run (needs user confirmation before sending audio), then `progress` over the real assessments.
+T5 done. Ask the user before pushing `feat/voice-drill-progress` and opening a draft PR -> #3. Then T6 (ask default
+`answer_mode` first).
 Stacked-to-main PR slicing agreed; no push yet.
