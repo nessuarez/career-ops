@@ -1,0 +1,21 @@
+# Copy to config/voice.yml (user layer). No secrets here: the Azure key and
+# region live in .env as AZURE_SPEECH_KEY and AZURE_SPEECH_REGION.
+voice:
+  enabled: true
+  locale: en-US                  # accent of the questions (en-US, en-GB, en-IN, ...)
+  voice: en-US-JennyNeural       # any voice from `node voice/voice.mjs voices --locale en-US`
+  style: friendly                # tone (mstts:express-as); used only if the voice supports it
+  style_degree: 1.0              # style intensity, 0.01-2
+  rate: "-5%"                    # speed; negative = slower
+  pitch: default                 # "+5%", "-2st", default, ...
+  show_text: true                # false = listening mode: the question is not shown as text
+  player: auto                   # auto | afplay | aplay | paplay | ffplay | powershell
+  cache: true                    # do not pay twice for the same text
+  monthly_char_budget: 450000    # warn before the 500,000 free characters of the F0 tier
+
+  # Interviewer persona overlays; any base setting above can be overridden.
+  personas:
+    recruiter:      { voice: en-US-JennyNeural, style: friendly, rate: "0%" }
+    hiring-manager: { voice: en-US-GuyNeural,   style: null,     rate: "-5%" }
+    panel:          { voice: en-GB-RyanNeural,  style: null,     rate: "0%" }
+    me:             { voice: en-US-JennyNeural, style: null,     rate: "-10%" }   # voice for your own model answers
