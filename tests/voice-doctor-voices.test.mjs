@@ -113,12 +113,11 @@ test('voices needs --locale and never leaks the key on errors', async () => {
   assert.match(c.err, /xx-XX/);
 });
 
-test('drill and progress stay not implemented', async () => {
-  for (const c of ['drill', 'progress']) {
-    const r = await run([c]);
-    assert.equal(r.code, 1);
-    assert.match(r.err, /not implemented yet/);
-  }
+test('an unknown command lists every available command', async () => {
+  const r = await run(['bogus']);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /unknown command "bogus".*drill.*progress/);
+  assert.doesNotMatch(r.err, /coming|not implemented/);
 });
 
 // --- ffmpeg check (warn level: only phone files and long audio need it) ---
