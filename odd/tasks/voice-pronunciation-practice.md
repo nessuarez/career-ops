@@ -169,6 +169,6 @@ Windows, en-US.
   is still not run live. Noted, not changed: drill's console summary does not print omitted/inserted (they are in the JSON).
 
 ## Next step
-T5 done. Ask the user before pushing `feat/voice-drill-progress` and opening a draft PR -> #3. Then T6 (ask default
+T5 done and shipped in draft PR #5 (`feat/voice-drill-progress` -> `feat/voice-pronunciation-practice`, user-approved push). Next: T6 (ask default
 `answer_mode` first).
 Stacked-to-main PR slicing agreed; no push yet.
