@@ -17,6 +17,10 @@ export const DEFAULTS = Object.freeze({
   player: 'auto',
   cache: true,
   monthly_char_budget: 450000,
+  record_device: 'default',
+  record_silence_threshold: '0.15%', // minimum speech level; the real threshold is calibrated on the room noise
+  record_stop_silence_s: 3.0,
+  record_max_s: 150,
   personas: {},
 });
 
@@ -25,6 +29,8 @@ const LOCALE_RE = /^[a-z]{2,3}-[A-Z]{2}$/;
 const RATE_RE = /^[+-]?\d+(\.\d+)?%$/;
 const PITCH_RE = /^(default|[+-]?\d+(\.\d+)?(%|st|Hz))$/;
 const REGION_RE = /^[a-z0-9]+$/;
+const THRESHOLD_RE = /^\d+(\.\d+)?%$/;
+export const MAX_RECORD_S = 600;
 
 // Hosts the module may talk to; later features add the speech-to-text host here.
 export function isAllowedHost(host, region) {
@@ -68,6 +74,11 @@ function validate(s, where, partial) {
   check('player', (v) => PLAYERS.includes(v), `one of ${PLAYERS.join('|')}`);
   check('cache', (v) => typeof v === 'boolean', 'a boolean');
   check('monthly_char_budget', (v) => Number.isInteger(v) && v > 0, 'a positive integer');
+  // A leading "-" would make sox read the device as an option.
+  check('record_device', (v) => typeof v === 'string' && v.length > 0 && !v.startsWith('-'), 'a non-empty device name not starting with "-"');
+  check('record_silence_threshold', (v) => typeof v === 'string' && THRESHOLD_RE.test(v) && parseFloat(v) <= 100, 'a percentage from 0% to 100% like "1%"');
+  check('record_stop_silence_s', (v) => typeof v === 'number' && v > 0 && v <= 30, 'a number of seconds above 0 and up to 30');
+  check('record_max_s', (v) => typeof v === 'number' && v > 0 && v <= MAX_RECORD_S, `a number of seconds above 0 and up to ${MAX_RECORD_S}`);
 }
 
 export function loadVoiceConfig({ root } = {}) {

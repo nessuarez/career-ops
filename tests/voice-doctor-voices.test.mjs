@@ -34,6 +34,7 @@ async function run(args, { yml, env = `AZURE_SPEECH_KEY=${KEY}\nAZURE_SPEECH_REG
       root,
       now: () => NOW,
       platform: 'win32',
+      recordImpl: async () => { throw Object.assign(new Error('no mic in tests'), { code: 'SOX_MISSING' }); },
       stdout: (s) => out.push(s),
       stderr: (s) => err.push(s),
       fetchImpl: async () => ({ ok: status === 200, status, json: async () => VOICES }),
@@ -110,8 +111,8 @@ test('voices needs --locale and never leaks the key on errors', async () => {
   assert.match(c.err, /xx-XX/);
 });
 
-test('record, assess, drill and progress stay not implemented', async () => {
-  for (const c of ['record', 'assess', 'drill', 'progress']) {
+test('assess, drill and progress stay not implemented', async () => {
+  for (const c of ['assess', 'drill', 'progress']) {
     const r = await run([c]);
     assert.equal(r.code, 1);
     assert.match(r.err, /not implemented yet/);

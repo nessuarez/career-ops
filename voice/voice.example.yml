@@ -13,6 +13,12 @@ voice:
   cache: true                    # do not pay twice for the same text
   monthly_char_budget: 450000    # warn before the 500,000 free characters of the F0 tier
 
+  # Recording (SoX): starts when you speak, stops after trailing silence.
+  record_device: default         # waveaudio device name; "default" = Windows default microphone
+  record_silence_threshold: 0.15%  # MINIMUM level counted as speech; the real threshold is calibrated on the room noise (up to 1%)
+  record_stop_silence_s: 3.0     # seconds of silence that end the recording
+  record_max_s: 150              # hard cut, only a safety net; --max overrides it
+
   # Interviewer persona overlays; any base setting above can be overridden.
   personas:
     recruiter:      { voice: en-US-JennyNeural, style: friendly, rate: "0%" }
